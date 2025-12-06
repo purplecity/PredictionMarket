@@ -1,0 +1,5 @@
+disallowed-methods = [
+    { path = "core::result::Result::unwrap", reason = "use ? or expect instead" },
+    { path = "core::option::Option::unwrap", reason = "use ? or expect instead" },
+]
+too-many-arguments-threshold = 8

@@ -1,0 +1,16 @@
+unstable_features = true
+blank_lines_upper_bound = 1
+blank_lines_lower_bound = 0
+max_width = 200
+hard_tabs = true
+tab_spaces = 4
+condense_wildcard_suffixes = true
+force_multiline_blocks = true
+imports_granularity = "One"
+group_imports = "One"
+reorder_impl_items = true
+reorder_imports = true
+reorder_modules = true
+style_edition = "2024"
+use_field_init_shorthand = true
+use_small_heuristics = "Max"

@@ -1,0 +1,8 @@
+[logging]
+level = "info"
+file = "./logs/asset.log"
+console = false
+rotation_max_files = 3
+
+[grpc]
+port = 5003 #必须跟环境变量asset_url中一致

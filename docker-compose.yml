@@ -1,0 +1,224 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: prediction_postgres
+    environment:
+      POSTGRES_DB: prediction_market
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 123456
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./script/database.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - prediction_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis
+  redis:
+    image: redis:7-alpine
+    container_name: prediction_redis
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - prediction_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Asset Service
+  asset:
+    build:
+      context: .
+      dockerfile: deploy/asset/Dockerfile
+    container_name: prediction_asset
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "5003:5003"
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - prediction_network
+    restart: unless-stopped
+
+  # Match Engine Service
+  match_engine:
+    build:
+      context: .
+      dockerfile: deploy/match_engine/Dockerfile
+    container_name: prediction_match_engine
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./data/match_engine:/app/data/match_engine
+    networks:
+      - prediction_network
+    restart: unless-stopped
+
+  # Store Service
+  store:
+    build:
+      context: .
+      dockerfile: deploy/store/Dockerfile
+    container_name: prediction_store
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./data/store:/app/data/store
+    networks:
+      - prediction_network
+    restart: unless-stopped
+
+  # Event Service
+  event:
+    build:
+      context: .
+      dockerfile: deploy/event/Dockerfile
+    container_name: prediction_event
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - prediction_network
+    restart: unless-stopped
+
+  # Processor Service
+  processor:
+    build:
+      context: .
+      dockerfile: deploy/processor/Dockerfile
+    container_name: prediction_processor
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      asset:
+        condition: service_started
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - prediction_network
+    restart: unless-stopped
+
+  # Depth Service
+  depth:
+    build:
+      context: .
+      dockerfile: deploy/depth/Dockerfile
+    container_name: prediction_depth
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - prediction_network
+    restart: unless-stopped
+
+  # Onchain Message Service
+  onchain_msg:
+    build:
+      context: .
+      dockerfile: deploy/onchain_msg/Dockerfile
+    container_name: prediction_onchain_msg
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      asset:
+        condition: service_started
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - prediction_network
+    restart: unless-stopped
+
+  # WebSocket Depth Service
+  websocket_depth:
+    build:
+      context: .
+      dockerfile: deploy/websocket_depth/Dockerfile
+    container_name: prediction_websocket_depth
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "5004:5004"
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - prediction_network
+    restart: unless-stopped
+
+  # WebSocket User Service
+  websocket_user:
+    build:
+      context: .
+      dockerfile: deploy/websocket_user/Dockerfile
+    container_name: prediction_websocket_user
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "5005:5005"
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - prediction_network
+    restart: unless-stopped
+
+  # API Service
+  api:
+    build:
+      context: .
+      dockerfile: deploy/api/Dockerfile
+    container_name: prediction_api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      asset:
+        condition: service_started
+    ports:
+      - "5002:5002"
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - prediction_network
+    restart: unless-stopped
+
+networks:
+  prediction_network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:

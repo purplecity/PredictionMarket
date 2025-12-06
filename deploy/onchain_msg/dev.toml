@@ -1,0 +1,13 @@
+[logging]
+level = "info"
+file = "./logs/onchain_msg.log"
+console = false
+rotation_max_files = 3
+
+[trade_response_mq]
+consumer_count = 2
+batch_size = 10
+
+[onchain_action_mq]
+consumer_count = 2
+batch_size = 10

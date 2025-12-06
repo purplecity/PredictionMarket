@@ -1,0 +1,8 @@
+[logging]
+level = "info"
+console = true
+file = "./logs/websocket_user.log"
+rotation_max_files = 3
+
+[server]
+port = 5005

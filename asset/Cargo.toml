@@ -1,0 +1,25 @@
+[package]
+name = "asset"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+tokio = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+sqlx = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+config = { workspace = true }
+chrono = { workspace = true }
+common = { path = "../common" }
+proto = { path = "../proto" }
+rust_decimal = { workspace = true }
+redis = { workspace = true }
+dotenv = { workspace = true }
+uuid = { workspace = true }

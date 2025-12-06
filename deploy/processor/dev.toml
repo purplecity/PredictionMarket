@@ -1,0 +1,9 @@
+[logging]
+level = "info"
+file = "./logs/processor.log"
+console = false
+rotation_max_files = 3
+
+[processor_mq]
+consumer_count = 2
+batch_size = 10

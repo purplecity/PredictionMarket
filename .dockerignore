@@ -1,0 +1,46 @@
+# Git
+.git
+.gitignore
+
+# Build artifacts
+target/
+**/target/
+
+# Data and logs
+data/
+logs/
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Documentation
+*.md
+CLAUDE.md
+TESTING.md
+QUICKSTART.md
+prompt.md
+test.md
+tmp.md
+
+# Scripts
+scripts/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Rust
+**/*.rs.bk
+*.pdb
+
+# Redis
+*.rdb
+
+# Environment
+.env
+.env.local

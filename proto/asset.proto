@@ -1,0 +1,230 @@
+syntax = "proto3";
+
+package asset;
+
+// 通用响应
+message Response {
+  bool success = 1;
+  string reason = 2;
+}
+
+// 带 update_id 的响应（用于订单取消等需要返回更新后 update_id 的场景）
+message ResponseWithUpdateId {
+  bool success = 1;
+  string reason = 2;
+  int64 update_id = 3;
+}
+
+//充值通知
+message DepositRequest {
+  int64 user_id = 1;
+  string amount = 2;
+  string token_id = 3; //usdc就是usdc token就是token_id
+  string tx_hash = 4; // 资产变化追溯标识符 这里就是交易hash
+  int64 event_id = 5;
+  int32 market_id = 6;
+  string privy_id = 7; // 用于websocket推送
+  string outcome_name = 8;  // 用于websocket推送
+}
+
+//提现通知
+message WithdrawRequest {
+  int64 user_id = 1;
+  string amount = 2;
+  string token_id = 3; //usdc就是usdc token就是token_id
+  string tx_hash = 4; // 资产变化追溯标识符 这里就是交易hash
+  int64 event_id = 5;
+  int32 market_id = 6;
+  string privy_id = 7; // 用于websocket推送
+  string outcome_name = 8;  // 用于websocket推送
+}
+
+//所有的price/amount/volume统一用字符串
+
+message CreateOrderRequest {
+  int64 user_id = 1;
+  int64 event_id = 2;
+  int32 market_id = 3;
+  string outcome = 4;
+  string token_id = 5;
+  string order_side = 6;
+  string order_type = 7;
+  string price = 8;
+  string quantity = 9;
+  string volume = 10;
+  SignatureOrderMsg signature_order_msg = 11;
+}
+
+message SignatureOrderMsg {
+  string expiration = 1;
+  string fee_rate_bps = 2;
+  string maker = 3;
+  string maker_amount = 4;
+  string nonce = 5;
+  int64 salt = 6;
+  string side = 7;
+  string signature = 8;
+  int32 signature_type = 9;
+  string signer = 10;
+  string taker = 11;
+  string taker_amount = 12;
+  string token_id = 13;
+}
+
+message CreateOrderResponse {
+  bool success = 1;
+  string reason = 2;
+  string order_id = 3;
+  int64 update_id = 4; // 订单的 update_id，新订单为 1
+}
+
+message OrderRejectedRequest {
+  int64 user_id = 1; //用户id
+  string order_id = 2;
+
+}
+
+//限价单才能cancel
+message CancelOrderRequest {
+  int64 user_id = 1;
+  string order_id = 2;
+  string cancelled_quantity = 3;
+  string volume = 4; //限价单就是价格*取消数量 市价单包括退还的钱
+}
+
+//插入trade更新order 然后返回批次的signature信息
+message TradeRequest {
+  TakerTradeInfo taker_trade_info = 1;
+  repeated MakerTradeInfo maker_trade_infos = 2;
+  string trade_id = 3;
+  int64 timestamp = 4; //撮合成交时间戳
+  int64 event_id = 5;
+  int32 market_id = 6;
+}
+
+message TakerTradeInfo {
+    int64 taker_id = 5;
+    string taker_order_id = 6;
+    string taker_order_side = 7;
+    string taker_token_id = 8;
+    string taker_usdc_amount = 9;
+    string taker_token_amount = 10;
+}
+message MakerTradeInfo {
+    int64 maker_id = 1;
+    string maker_order_id = 2;
+    string maker_order_side = 3;
+    string maker_token_id = 4;
+    string maker_usdc_amount = 5;
+    string maker_token_amount = 6;
+    string maker_price = 7;
+}
+
+
+message OrderUpdateId {
+  string order_id = 1;
+  int64 update_id = 2;
+}
+
+message TradeResponse {
+  bool success = 1;
+  string reason = 2;
+  repeated SignatureOrderMsg signature_order_msgs = 3;
+  repeated OrderUpdateId order_update_ids = 4; // 所有涉及订单的 update_id（taker + makers）
+}
+
+message TradeOnchainSendResultRequest {
+  string trade_id = 1;
+  int64 event_id = 2;
+  int32 market_id = 3;
+  TakerTradeOnchainInfo taker_trade_info = 4;
+  repeated MakerTradeOnchainInfo maker_trade_infos = 5;
+  string tx_hash = 6;
+  bool success = 7;
+}
+
+message TakerTradeOnchainInfo {
+  string taker_side = 1;
+  int64 taker_user_id = 2;
+  string taker_usdc_amount = 4;
+  string taker_token_amount = 5;
+  string taker_token_id = 6;
+  string taker_order_id = 7;
+  string real_taker_usdc_amount = 8;
+  string real_taker_token_amount = 9;
+  //限价单是没有refund的 市价单有因为市价单是先冻结资产 没成交的就取消了所以有refund 所以解冻这里要带上可能refund的金额
+  string taker_unfreeze_amount = 10;
+  string taker_privy_user_id = 11; // 用于websocket推送
+  string taker_outcome_name = 12;  // 用于websocket推送
+}
+
+message MakerTradeOnchainInfo {
+  string maker_side = 1;
+  int64 maker_user_id = 2;
+  string maker_usdc_amount = 4;
+  string maker_token_amount = 5;
+  string maker_token_id = 6;
+  string maker_order_id = 7;
+  string maker_price = 8;
+  string real_maker_usdc_amount = 9;
+  string real_maker_token_amount = 10;
+  string maker_privy_user_id = 11; // 用于websocket推送
+  string maker_outcome_name = 12;  // 用于websocket推送
+}
+
+message SplitRequest {
+  int64 user_id = 1;
+  string usdc_amount = 2;
+  string token_0_id = 3;
+  string token_1_id = 4;
+  string token_0_amount = 5;
+  string token_1_amount = 6;
+  string tx_hash = 7;
+  int64 event_id = 8;
+  int32 market_id = 9;
+  string privy_id = 10;    // 用于websocket推送
+  string outcome_name_0 = 11;   // token_0 outcome名称
+  string outcome_name_1 = 12;   // token_1 outcome名称
+}
+
+message MergeRequest {
+  int64 user_id = 1;
+  string token_0_id = 2;
+  string token_1_id = 3;
+  string token_0_amount = 4;
+  string token_1_amount = 5;
+  string usdc_amount = 6;
+  string tx_hash = 7;
+  int64 event_id = 8;
+  int32 market_id = 9;
+  string privy_id = 10;    // 用于websocket推送
+  string outcome_name_0 = 11;   // token_0 outcome名称
+  string outcome_name_1 = 12;   // token_1 outcome名称
+}
+
+message RedeemRequest {
+  int64 user_id = 1;
+  string token_id_0 = 2;
+  string token_id_1 = 3;
+  string usdc_amount = 4;
+  string tx_hash = 5;
+  int64 event_id = 8;
+  int32 market_id = 9;
+  string privy_id = 10;    // 用于websocket推送
+  string outcome_name_0 = 11;   // token_0 outcome名称
+  string outcome_name_1 = 12;   // token_1 outcome名称
+}
+
+// Asset服务定义
+service AssetService {
+  rpc Deposit(DepositRequest) returns (Response);
+  rpc Withdraw(WithdrawRequest) returns (Response);
+  rpc CreateOrder(CreateOrderRequest) returns (CreateOrderResponse);
+  rpc OrderRejected(OrderRejectedRequest) returns (Response);
+  rpc CancelOrder(CancelOrderRequest) returns (ResponseWithUpdateId);
+  rpc Trade(TradeRequest) returns (TradeResponse);
+  rpc TradeOnchainSendResult(TradeOnchainSendResultRequest) returns (Response);
+  rpc Split(SplitRequest) returns (Response);
+  rpc Merge(MergeRequest) returns (Response);
+  rpc Redeem(RedeemRequest) returns (Response);
+}

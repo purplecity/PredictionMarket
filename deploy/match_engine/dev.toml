@@ -1,0 +1,16 @@
+[logging]
+level = "info"
+file = "./logs/match_engine.log"
+console = false
+rotation_max_files = 3
+
+[engine_input_mq]
+order_input_consumer_count = 2
+order_input_batch_size = 100
+event_input_batch_size = 10
+
+[engine_output_mq]
+output_task_count = 4
+
+[engine]
+engine_max_order_count = 10000

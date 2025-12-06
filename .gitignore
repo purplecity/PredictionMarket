@@ -1,0 +1,24 @@
+/target
+/.idea
+/logs
+prompt.md
+CLAUDE.md
+.DS_Store
+*.rdb
+data/store/orders_snapshot.json
+data/match_engine/orders_snapshot.json
+scripts/check_services.sh
+scripts/e2e_test.sh
+scripts/monitor.sh
+scripts/start_services.sh
+scripts/stop_services.sh
+TESTING.md
+QUICKSTART.md
+test.md
+tmp.md
+data/
+
+# 压测结果
+script/benchmark/results/
+tests/benchmark/results/
+tests/benchmark/target/

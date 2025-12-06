@@ -1,0 +1,5 @@
+[logging]
+level = "info"
+file = "./logs/event.log"
+console = false
+rotation_max_files = 3

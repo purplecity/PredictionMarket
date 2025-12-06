@@ -1,0 +1,8 @@
+[logging]
+level = "debug"
+file = "./logs/api.log"
+console = true
+rotation_max_files = 3
+
+[server]
+port = 5002

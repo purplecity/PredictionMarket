@@ -1,0 +1,23 @@
+[package]
+name = "store"
+version = "0.0.0"
+edition = "2024"
+
+[[bin]]
+name = "store"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+config = { workspace = true }
+redis = { workspace = true }
+deadpool-redis = { workspace = true }
+rust_decimal = { workspace = true }
+common = { path = "../common" }

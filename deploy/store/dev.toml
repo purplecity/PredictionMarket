@@ -1,0 +1,8 @@
+[logging]
+level = "info"
+file = "./logs/store.log"
+console = false
+rotation_max_files = 3
+
+[engine_output_mq]
+batch_size = 100

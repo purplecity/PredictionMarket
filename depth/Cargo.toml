@@ -1,0 +1,15 @@
+[package]
+name = "depth"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+tokio = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+redis = { workspace = true }
+config = { workspace = true }
+toml = { workspace = true }
+common = { path = "../common" }

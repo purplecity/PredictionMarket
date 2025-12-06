@@ -1,0 +1,20 @@
+[package]
+name = "tests"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+# Workspace dependencies
+tokio = { workspace = true }
+anyhow = { workspace = true }
+rust_decimal = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+uuid = { workspace = true }
+dotenv = { workspace = true }
+
+# Internal crates
+common = { path = "../common" }
+match_engine = { path = "../match_engine" }
+asset = { path = "../asset" }
