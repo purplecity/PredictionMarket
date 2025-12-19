@@ -353,6 +353,7 @@ dependencies = [
  "match_engine",
  "mimalloc",
  "rand 0.8.5",
+ "rust_decimal",
  "serde",
  "serde_json",
  "tabled",
@@ -3547,6 +3548,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "asset",
+ "chrono",
  "common",
  "dotenv",
  "match_engine",

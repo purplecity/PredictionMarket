@@ -49,16 +49,15 @@ async fn extract_and_check(State(state): State<AppState>, connect_info: ConnectI
 	// 从请求头中获取真实IP，优先级：X-Forwarded-For > X-Real-IP > ConnectInfo
 	let ip = request
 		.headers()
-		.get("x-forwarded-for")
-		.or_else(|| request.headers().get("X-Forwarded-For"))
+		.get("x-real-ip")
+		.or_else(|| request.headers().get("X-Real-IP"))
 		.and_then(|header| header.to_str().ok())
 		.and_then(|value| value.split(',').next()) // 取第一个IP
 		.map(|s| s.trim().to_string())
-		.or_else(|| request.headers().get("x-real-ip").or_else(|| request.headers().get("X-Real-IP")).and_then(|header| header.to_str().ok()).map(|s| s.trim().to_string()))
+		.or_else(|| request.headers().get("x-forwarded-for").or_else(|| request.headers().get("X-Forwarded-For")).and_then(|header| header.to_str().ok()).map(|s| s.trim().to_string()))
 		.unwrap_or_else(|| connect_info.ip().to_string());
 
 	let uri_path = request.uri().path().to_string(); //子路由没有api前缀
-	// info!("ip: {}, uri_path: {}", ip, uri_path);
 
 	// exract
 	let common_env = common::common_env::get_common_env();
@@ -85,7 +84,7 @@ async fn extract_and_check(State(state): State<AppState>, connect_info: ConnectI
 }
 
 pub fn init_app_state() -> anyhow::Result<AppState> {
-	let rate_limiter = RateLimiter::new_with_multi_pattern_with_same_rule(&RATE_LIMIT_PATTERNS.iter().map(|s| s.to_string()).collect::<Vec<String>>(), 1, 1)?;
+	let rate_limiter = RateLimiter::new_with_multi_pattern_with_same_rule(&RATE_LIMIT_PATTERNS.iter().map(|s| s.to_string()).collect::<Vec<String>>(), 5, 1)?;
 	let state = AppState { rate_limiter: Arc::new(rate_limiter) };
 	let rate_limiter_clone = state.rate_limiter.clone();
 	tokio::spawn(async move { rate_limit_gc(rate_limiter_clone).await });

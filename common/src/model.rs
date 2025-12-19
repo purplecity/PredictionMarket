@@ -66,6 +66,9 @@ pub struct EventMarket {
 	pub token_ids: Vec<String>,       //token id
 	pub win_outcome_name: String,     //赢的结果名称
 	pub win_outcome_token_id: String, //赢的结果token id
+	pub volume: Decimal,
+	pub closed: bool,                             //单个市场是否关闭
+	pub closed_at: Option<chrono::DateTime<Utc>>, //单个市场关闭时间
 }
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct EventTopics {
@@ -86,12 +89,24 @@ pub struct Orders {
 	pub order_side: OrderSide, //买入或卖出
 	pub order_type: OrderType, //限价单或市价单
 
-	pub price: Decimal,              //就算是市价单也有价格
+	//限价单
+	pub price: Decimal,
 	pub quantity: Decimal,           //提交的数量 永远是token的数量 而不是usdc
-	pub volume: Decimal,             //用以冻结usdc 要自己算下等于price*quantity 前端不会传volume 但是不管是限价单还是市价单一定会有price 市价单没吃完会直接取消
+	pub volume: Decimal,             //用以冻结usdc 要自己算下等于price*quantity 对于限价单makerAmount或者takerAmount除以10的18次方
 	pub filled_quantity: Decimal,    //已成交的数量 永远是token的数量 而不是usdc
 	pub cancelled_quantity: Decimal, //已取消的数量 永远是token的数量 而不是usdc
-	pub status: OrderStatus,         //订单状态
+
+	//市价单
+	//市价买的时候 不用管market_quantity和market_cancelled_quantity
+	//市价卖的时候 不用管market_volume和market_cancelled_volume
+	pub market_price: Decimal,              //输入价格 用来撮合匹配
+	pub market_volume: Decimal,             //输入usdc 冻结usdc 同时撮合的时候不超过这个值
+	pub market_quantity: Decimal,           //输入token 冻结token 同时撮合的时候不超过这个值
+	pub market_filled_quantity: Decimal,    //已成交的token
+	pub market_cancelled_quantity: Decimal, //已取消的token
+	pub market_filled_volume: Decimal,      //已成交的usdc
+	pub market_cancelled_volume: Decimal,   //已取消的usdc
+	pub status: OrderStatus,                //订单状态
 
 	pub signature_order_msg: sqlx::types::Json<SignatureOrderMsg>, //发送交易需要 保持前端格式不动
 	pub update_id: i64,                                            //用于websocket消息顺序保证，每次更新自增

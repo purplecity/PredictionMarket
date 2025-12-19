@@ -68,7 +68,7 @@ async fn run_statistic() -> anyhow::Result<()> {
 		event_volumes.entry(*event_id).or_insert(CacheEventVolume { event_id: *event_id, total_volume: Decimal::ZERO, market_volumes: Vec::new() });
 	}
 
-	// 4. 批量更新 event 表
+	// 4. 批量更新 event 表的 volume
 	if !event_volumes.is_empty() {
 		let event_ids: Vec<i64> = event_volumes.values().map(|mv| mv.event_id).collect();
 		let volumes: Vec<Decimal> = event_volumes.values().map(|mv| mv.total_volume).collect();
@@ -88,7 +88,10 @@ async fn run_statistic() -> anyhow::Result<()> {
 		.await?;
 	}
 
-	// 5. 批量更新 Redis 缓存（使用 pipeline）
+	// 5. 更新每个 event 的 markets JSONB 中各个 market 的 volume
+	update_market_volumes(&pool, &event_volumes).await?;
+
+	// 6. 批量更新 Redis 缓存（使用 pipeline）
 	update_redis_cache(&event_volumes).await?;
 
 	info!("Successfully updated volume for {} events", event_volumes.len());
@@ -96,22 +99,66 @@ async fn run_statistic() -> anyhow::Result<()> {
 	Ok(())
 }
 
+/// 更新 markets JSONB 中各个 market 的 volume
+async fn update_market_volumes(pool: &sqlx::PgPool, event_volumes: &HashMap<i64, CacheEventVolume>) -> anyhow::Result<()> {
+	for event_volume in event_volumes.values() {
+		if event_volume.market_volumes.is_empty() {
+			continue;
+		}
+
+		// 对每个 market 使用 JSONB 操作符更新 volume
+		for market_volume in &event_volume.market_volumes {
+			let market_id_str = market_volume.market_id.to_string();
+
+			sqlx::query(
+				r#"
+				UPDATE events
+				SET markets = jsonb_set(
+					markets,
+					ARRAY[$1, 'volume']::text[],
+					to_jsonb($2::decimal)
+				)
+				WHERE id = $3
+				"#,
+			)
+			.bind(&market_id_str)
+			.bind(market_volume.volume)
+			.bind(event_volume.event_id)
+			.execute(pool)
+			.await?;
+		}
+	}
+
+	Ok(())
+}
+
 /// 批量更新 Redis 缓存
-/// key: "volume", field: event_id, value: CacheEventVolume JSON
+/// key: "volume"
+/// field: event_id -> event 总交易量
+/// field: event_id::market_id -> 单个 market 交易量
+/// 每个 event 单独执行一次 pipeline，避免命令过多导致阻塞
 async fn update_redis_cache(event_volumes: &HashMap<i64, CacheEventVolume>) -> anyhow::Result<()> {
 	let mut conn = common::redis_pool::get_cache_redis_connection().await?;
 
-	// 创建 pipeline
-	let mut pipe = redis::pipe();
-
 	for event_volume in event_volumes.values() {
-		let field = event_volume.event_id.to_string();
-		let value = serde_json::to_string(event_volume)?;
-		pipe.hset(VOLUME_CACHE_KEY, &field, value);
-	}
+		// 为单个 event 创建 pipeline
+		let mut pipe = redis::pipe();
 
-	// 批量执行
-	let _: () = pipe.query_async(&mut conn).await?;
+		// 存储 event 级别的交易量：field = event_id
+		let event_field = event_volume.event_id.to_string();
+		let event_volume_str = event_volume.total_volume.to_string();
+		pipe.hset(VOLUME_CACHE_KEY, &event_field, event_volume_str);
+
+		// 存储每个 market 的交易量：field = event_id::market_id
+		for market_volume in &event_volume.market_volumes {
+			let market_field = common::key::market_field(event_volume.event_id, market_volume.market_id);
+			let market_volume_str = market_volume.volume.to_string();
+			pipe.hset(VOLUME_CACHE_KEY, &market_field, market_volume_str);
+		}
+
+		// 执行单个 event 的 pipeline
+		let _: () = pipe.query_async(&mut conn).await?;
+	}
 
 	Ok(())
 }

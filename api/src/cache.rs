@@ -12,11 +12,11 @@ pub enum CacheError {
 	#[error("User not found: {0}")]
 	UserNotFound(String),
 
-	#[error("Event not found: {0}")]
-	EventNotFound(i64),
+	#[error("Event not found or closed: {0}")]
+	EventNotFoundOrClosed(i64),
 
-	#[error("Market not found: event_id={0}, market_id={1}")]
-	MarketNotFound(i64, i16),
+	#[error("Market not found or closed: event_id={0}, market_id={1}")]
+	MarketNotFoundOrClosed(i64, i16),
 
 	#[error("Cache not initialized")]
 	NotInitialized,
@@ -105,8 +105,8 @@ pub async fn get_event(event_id: i64) -> Result<ApiMQEventCreate, CacheError> {
 			Ok(api_event)
 		}
 		None => {
-			// 4. 还查不到，返回没找到错误
-			Err(CacheError::EventNotFound(event_id))
+			// 4. 还查不到，返回没找到或已关闭错误
+			Err(CacheError::EventNotFoundOrClosed(event_id))
 		}
 	}
 }
@@ -125,11 +125,87 @@ pub(crate) async fn remove_event(event_id: i64) {
 	write_guard.remove(&event_id);
 }
 
-/// 获取指定 event_id 和 market_id 的市场信息
+/// 向事件中添加单个 market（内部使用）
+pub(crate) async fn add_market_to_event(event_id: i64, market_id: i16, market: common::event_types::ApiMQEventMarket) {
+	let cache = EVENT_CACHE.get().expect("Event cache not initialized");
+	let mut write_guard = cache.write().await;
+
+	if let Some(event) = write_guard.get_mut(&event_id) {
+		let market_id_str = market_id.to_string();
+		event.markets.insert(market_id_str, market);
+	}
+}
+
+/// 关闭事件中的单个 market（内部使用）
+/// market关闭时不需要修改缓存，因为缓存只存储不变的信息
+/// closed状态从数据库查询获取
+pub(crate) async fn remove_market_from_event(_event_id: i64, _market_id: i16) {
+	// market关闭时不需要做任何操作，closed状态从数据库查询获取
+}
+
+/// 获取指定 event_id 和 market_id 的市场信息（仅从缓存获取）
 pub async fn get_market(event_id: i64, market_id: i16) -> Result<common::event_types::ApiMQEventMarket, CacheError> {
 	let event = get_event(event_id).await?;
 	let market_id_str = market_id.to_string();
-	event.markets.get(&market_id_str).cloned().ok_or(CacheError::MarketNotFound(event_id, market_id))
+	event.markets.get(&market_id_str).cloned().ok_or(CacheError::MarketNotFoundOrClosed(event_id, market_id))
+}
+
+/// 获取市场信息并检查是否关闭（用于下单等需要验证状态的场景）
+/// 直接查询数据库，检查 event.closed 和 market.closed 状态
+pub async fn get_market_and_check_closed(event_id: i64, market_id: i16) -> Result<common::event_types::ApiMQEventMarket, CacheError> {
+	let read_pool = get_db_read_pool().map_err(|_| CacheError::NotInitialized)?;
+	let market_id_str = market_id.to_string();
+
+	// 查询 event 以及对应的 market
+	let result: Option<(bool, Option<serde_json::Value>)> =
+		sqlx::query_as("SELECT closed, markets->$1::text FROM events WHERE id = $2").bind(&market_id_str).bind(event_id).fetch_optional(&read_pool).await.map_err(CacheError::Database)?;
+
+	match result {
+		Some((event_closed, market_json)) => {
+			// 检查 event 是否关闭
+			if event_closed {
+				return Err(CacheError::EventNotFoundOrClosed(event_id));
+			}
+
+			// 检查 market 是否存在
+			let market_json = market_json.ok_or(CacheError::MarketNotFoundOrClosed(event_id, market_id))?;
+
+			// 解析 market 数据
+			let market: common::model::EventMarket = serde_json::from_value(market_json).map_err(|e| CacheError::Database(sqlx::Error::Decode(Box::new(e))))?;
+
+			// 检查 market 是否关闭
+			if market.closed {
+				return Err(CacheError::MarketNotFoundOrClosed(event_id, market_id));
+			}
+
+			// 构造 outcome_info
+			let mut outcome_info = std::collections::HashMap::new();
+			for (idx, token_id) in market.token_ids.iter().enumerate() {
+				if let Some(outcome_name) = market.outcomes.get(idx) {
+					outcome_info.insert(token_id.clone(), outcome_name.clone());
+				}
+			}
+
+			// 返回 ApiMQEventMarket
+			Ok(common::event_types::ApiMQEventMarket {
+				parent_collection_id: market.parent_collection_id,
+				market_id: market.id,
+				condition_id: market.condition_id,
+				market_identifier: market.market_identifier,
+				question: market.question,
+				slug: market.slug,
+				title: market.title,
+				image: market.image,
+				outcome_info,
+				outcome_names: market.outcomes.clone(),
+				outcome_token_ids: market.token_ids.clone(),
+			})
+		}
+		None => {
+			// Event 不存在
+			Err(CacheError::EventNotFoundOrClosed(event_id))
+		}
+	}
 }
 
 /// 批量获取多个事件信息

@@ -71,12 +71,45 @@ pub struct OnchainMQEventMarket {
 	pub outcomes: Vec<String>,
 }
 
+/// 单个 Market 添加消息 (用于 onchain_event_stream)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnchainMQMarketAdd {
+	pub event_id: i64,
+	pub market: OnchainMQEventMarket,
+}
+
+/// 单个 Market 关闭消息 (用于 onchain_event_stream)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnchainMQMarketClose {
+	pub event_id: i64,
+	pub market_id: i16,
+	pub win_outcome_token_id: String,
+	pub win_outcome_name: String,
+}
+
 /// 统一的事件消息枚举 (用于 onchain_event_stream)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "types")]
 pub enum OnchainEventMessage {
 	Create(OnchainMQEventCreate),
 	Close(MQEventClose),
+	MarketAdd(OnchainMQMarketAdd),
+	MarketClose(OnchainMQMarketClose),
+}
+
+/// API 单个 Market 添加消息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiMQMarketAdd {
+	pub event_id: i64,
+	pub market_id: i16,
+	pub market: ApiMQEventMarket,
+}
+
+/// API 单个 Market 关闭消息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiMQMarketClose {
+	pub event_id: i64,
+	pub market_id: i16,
 }
 
 /// API 事件消息枚举 (用于 api_mq_stream)
@@ -87,6 +120,10 @@ pub enum ApiEventMqMessage {
 	EventCreate(Box<ApiMQEventCreate>),
 	#[serde(rename = "EventClose")]
 	EventClose(MQEventClose),
+	#[serde(rename = "MarketAdd")]
+	MarketAdd(Box<ApiMQMarketAdd>),
+	#[serde(rename = "MarketClose")]
+	MarketClose(ApiMQMarketClose),
 }
 
 /// Event 交易量统计 (用于 Redis 缓存)

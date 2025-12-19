@@ -138,7 +138,12 @@ impl PlaceOrderRequest {
 			return Err("side must be buy or sell".to_string());
 		}
 
-		// 2. 校验 price
+		// 2. 校验 order_type
+		if self.order_type != common::consts::ORDER_TYPE_LIMIT && self.order_type != common::consts::ORDER_TYPE_MARKET {
+			return Err("order_type must be limit or market".to_string());
+		}
+
+		// 3. 校验 price
 		let price = Decimal::from_str(&self.price).map_err(|e| format!("Invalid price: {}", e))?;
 		let min_price = Decimal::new(1, 2); // 0.01
 		let max_price = Decimal::new(99, 2); // 0.99
@@ -150,7 +155,7 @@ impl PlaceOrderRequest {
 			return Err(format!("price can have at most 4 decimal places, got {}", price));
 		}
 
-		// 3. 校验 makerAmount 和 takerAmount
+		// 4. 校验 makerAmount 和 takerAmount
 		let maker_amount = Decimal::from_str(&self.maker_amount).map_err(|e| format!("Invalid makerAmount: {}", e))?;
 		let taker_amount = Decimal::from_str(&self.taker_amount).map_err(|e| format!("Invalid takerAmount: {}", e))?;
 
@@ -162,13 +167,15 @@ impl PlaceOrderRequest {
 			return Err("takerAmount must not be zero".to_string());
 		}
 
-		// 校验 makerAmount 必须能被 10^16 整除
+		// 校验币的数量 必须能被 10^16 整除
 		let divisor_16 = Decimal::from(10u64.pow(16));
-		if maker_amount % divisor_16 != Decimal::ZERO {
-			return Err(format!("makerAmount must be divisible by 10^16, got {}", maker_amount));
+		if self.side == common::consts::ORDER_SIDE_SELL && maker_amount % divisor_16 != Decimal::ZERO {
+			return Err(format!("token amount must be divisible by 10^16, got {}", maker_amount));
+		} else if self.side == common::consts::ORDER_SIDE_BUY && taker_amount % divisor_16 != Decimal::ZERO {
+			return Err(format!("token amount must be divisible by 10^16, got {}", taker_amount));
 		}
 
-		// 4. 根据 side 校验 takerAmount
+		// 5. 根据 side 校验 takerAmount
 		// 转换 makerAmount 为实际值（除以 10^18）
 		let divisor_18 = Decimal::from(10u64.pow(18));
 		let maker_amount_real = maker_amount.checked_div(divisor_18).ok_or("makerAmount division overflow".to_string())?;
@@ -177,7 +184,8 @@ impl PlaceOrderRequest {
 		let expected_taker_amount_real = if self.side == common::consts::ORDER_SIDE_BUY {
 			// BUY: takerAmount = makerAmount / price，截断保留 2 位小数
 			let calculated = maker_amount_real.checked_div(price).ok_or("Division overflow when calculating takerAmount".to_string())?;
-			calculated.trunc_with_scale(2).normalize()
+
+			if self.order_type == common::consts::ORDER_TYPE_MARKET { calculated.trunc_with_scale(2).normalize() } else { calculated.normalize() }
 		} else {
 			// SELL: takerAmount = makerAmount * price，截断保留 2 位小数
 			let calculated = maker_amount_real.checked_mul(price).ok_or("Multiplication overflow when calculating takerAmount".to_string())?;
@@ -195,17 +203,12 @@ impl PlaceOrderRequest {
 		// 校验 takerAmount 必须等于计算值
 		if taker_amount != expected_taker_amount {
 			return Err(format!(
-				"takerAmount mismatch: expected {}, got {}. When side is {}, takerAmount must equal makerAmount {} price (rounded to 2 decimal places)",
+				"takerAmount mismatch: expected {}, got {}. When side is {}, takerAmount must equal makerAmount {} price (market buy order rounded to 2 decimal places)",
 				expected_taker_amount,
 				taker_amount,
 				self.side,
 				if self.side == common::consts::ORDER_SIDE_BUY { "/" } else { "*" }
 			));
-		}
-
-		// 5. 校验 order_type
-		if self.order_type != common::consts::ORDER_TYPE_LIMIT && self.order_type != common::consts::ORDER_TYPE_MARKET {
-			return Err("order_type must be limit or market".to_string());
 		}
 
 		Ok(())
@@ -380,6 +383,7 @@ pub struct EventMarketDetail {
 	pub outcome_1_best_bid: Decimal,
 	#[serde(with = "rust_decimal::serde::str")]
 	pub outcome_1_best_ask: Decimal,
+	pub closed: bool,
 	pub winner_outcome_name: String,
 	pub winner_outcome_token_id: String,
 }

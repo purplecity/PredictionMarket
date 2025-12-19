@@ -67,3 +67,17 @@ pub struct MarketResult {
 	pub win_outcome_token_id: String, //赢的结果代币地址
 	pub win_outcome_name: String,     //赢的结果名称
 }
+
+/// 单个市场添加（在已有Event下添加Market）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketAdd {
+	pub event_identifier: String, //event的唯一标识
+	pub market: EventMarket,      //要添加的市场
+}
+
+/// 单个市场关闭
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketClose {
+	pub event_identifier: String,    //event的唯一标识
+	pub market_result: MarketResult, //市场结果
+}

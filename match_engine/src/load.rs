@@ -13,8 +13,8 @@ use {
 	redis::AsyncCommands,
 	serde_json,
 	std::{collections::HashMap, fs, path::Path},
-	tokio::{sync::broadcast, task::JoinSet, time::Duration},
-	tracing::{error, info, warn},
+	tokio::{sync::broadcast, time::Duration},
+	tracing::{info, warn},
 };
 
 /// 等待 STORE_STREAM 消息处理完成（消息长度为0）
@@ -147,17 +147,17 @@ pub async fn init_add_event(snapshot_event: common::store_types::SnapshotEvent, 
 	// 创建退出信号的broadcast channel
 	let (exit_sender, _) = broadcast::channel(1);
 
-	// 创建JoinSet来管理所有MatchEngine任务
-	let mut join_set = JoinSet::new();
 	let mut order_senders = HashMap::new();
+	let mut market_exit_signals = HashMap::new();
 
 	// 为每个market创建一个MatchEngine（处理token_0和token_1两个结果）
 	for (market_id_str, snapshot_market) in &snapshot_event.markets {
 		// 解析 market_id 从 String 到 i16
 		let market_id: i16 = market_id_str.parse().map_err(|e| anyhow::anyhow!("Invalid market_id '{}': {}", market_id_str, e))?;
 
-		// 创建exit_receiver
-		let exit_receiver = exit_sender.subscribe();
+		// 为每个market创建独立的退出信号（oneshot）
+		let (market_exit_sender, market_exit_receiver) = tokio::sync::oneshot::channel();
+		let global_exit_receiver = exit_sender.subscribe();
 
 		// 从market中获取token_ids
 		let token_ids = if snapshot_market.token_ids.len() >= 2 {
@@ -184,47 +184,29 @@ pub async fn init_add_event(snapshot_event: common::store_types::SnapshotEvent, 
 		let initial_update_id = snapshot_market.update_id;
 
 		// 创建 MatchEngine
+		// 创建 MatchEngine（使用global_exit_receiver和market_exit_receiver）
 		let (mut engine, order_sender) = if market_orders_map.is_empty() {
-			MatchEngine::new(event_id, market_id, token_ids, max_order_count, exit_receiver)
+			MatchEngine::new(event_id, market_id, token_ids, max_order_count, global_exit_receiver, market_exit_receiver)
 		} else {
-			MatchEngine::new_with_orders(event_id, market_id, token_ids, market_orders_map, max_order_count, exit_receiver)?
+			MatchEngine::new_with_orders(event_id, market_id, token_ids, market_orders_map, max_order_count, global_exit_receiver, market_exit_receiver)?
 		};
 
 		// 设置 Engine 的 update_id 为快照值 + 1
 		engine.update_id = initial_update_id;
 
-		// 启动MatchEngine的run任务并加入JoinSet
-		join_set.spawn(async move {
+		// 启动MatchEngine的run任务
+		tokio::spawn(async move {
 			engine.run().await;
 		});
 
-		// 使用event_id和market_id的组合作为key（不区分token_0/token_1，因为一个MatchEngine处理两个结果）
+		// 使用event_id和market_id的组合作为key
 		let market_key = format!("{}{}{}", event_id, common::consts::SYMBOL_SEPARATOR, market_id);
-		order_senders.insert(market_key, order_sender);
+		order_senders.insert(market_key.clone(), order_sender);
+		market_exit_signals.insert(market_key, market_exit_sender);
 	}
 
-	// 创建监控任务，等待所有MatchEngine任务完成
-	let event_id_for_monitor = event_id;
-	tokio::spawn(async move {
-		// 等待所有任务完成
-		while let Some(result) = join_set.join_next().await {
-			match result {
-				Ok(_) => {
-					// 任务正常完成
-				}
-				Err(e) => {
-					error!("MatchEngine task panicked for event {}: {}", event_id_for_monitor, e);
-				}
-			}
-		}
-
-		info!("All MatchEngine tasks for event {} have completed", event_id_for_monitor);
-	});
-
-	// 至此各个撮合引擎以及监控task已经运行
-
 	// 创建EventManager
-	let event_manager = EventManager { event_id, order_senders, exit_signal: exit_sender, end_timestamp: snapshot_event.end_date };
+	let event_manager = EventManager { event_id, order_senders, exit_signal: exit_sender, market_exit_signals, end_timestamp: snapshot_event.end_date };
 
 	// 将EventManager存储到全局Manager中
 	let manager = get_manager().write().await;

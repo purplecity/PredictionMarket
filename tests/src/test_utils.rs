@@ -3,6 +3,7 @@
 //! Common test environment setup and helper functions.
 
 use {
+	chrono::{DateTime, Utc},
 	rust_decimal::Decimal,
 	serde::Serialize,
 	sqlx::PgPool,
@@ -25,6 +26,9 @@ struct MarketData {
 	token_ids: [String; 2],
 	win_outcome_name: &'static str,
 	win_outcome_token_id: &'static str,
+	closed: bool,
+	closed_at: Option<DateTime<Utc>>,
+	volume: Decimal,
 }
 
 /// 测试环境配置
@@ -104,6 +108,9 @@ impl TestEnv {
 			token_ids: [token_0_id.clone(), token_1_id.clone()],
 			win_outcome_name: "",
 			win_outcome_token_id: "",
+			closed: false,
+			closed_at: None,
+			volume: Decimal::ZERO,
 		};
 		let mut markets_map: HashMap<String, MarketData> = HashMap::new();
 		markets_map.insert(market_id.to_string(), market_data);
@@ -223,9 +230,14 @@ impl TestEnv {
 
 /// 生成唯一的测试用户 ID
 pub fn generate_test_user_id() -> i64 {
-	use std::time::{SystemTime, UNIX_EPOCH};
+	use std::{
+		sync::atomic::{AtomicU64, Ordering},
+		time::{SystemTime, UNIX_EPOCH},
+	};
+	static COUNTER: AtomicU64 = AtomicU64::new(0);
 	let now = SystemTime::now().duration_since(UNIX_EPOCH).expect("time after epoch");
-	(now.as_secs() * 1_000_000 + now.subsec_micros() as u64) as i64
+	let counter = COUNTER.fetch_add(1, Ordering::SeqCst);
+	((now.as_secs() * 1_000_000 + now.subsec_micros() as u64) * 1000 + counter) as i64
 }
 
 /// 生成唯一的测试事件 ID

@@ -8,7 +8,7 @@ use {
 	chrono::Utc,
 	common::{
 		consts::{EVENT_INPUT_MSG_KEY, EVENT_INPUT_STREAM, ORDER_INPUT_MSG_KEY, ORDER_INPUT_STREAM},
-		engine_types::{CancelOrderMessage, EventInputMessage, Order, OrderInputMessage, SubmitOrderMessage},
+		engine_types::{CancelOrderMessage, EventInputMessage, OrderInputMessage, SubmitOrderMessage},
 		event_types::EngineMQEventCreate,
 		processor_types::{OrderRejected, ProcessorMessage},
 		store_types::OrderChangeEvent,
@@ -16,7 +16,7 @@ use {
 	redis::AsyncCommands,
 	serde_json,
 	std::collections::HashMap,
-	tokio::{sync::broadcast, task::JoinSet},
+	tokio::sync::broadcast,
 	tracing::{error, info},
 	uuid::Uuid,
 };
@@ -314,18 +314,9 @@ pub async fn submit_order(submit_order_message: SubmitOrderMessage) -> anyhow::R
 	// 使用event_id和market_id的组合来查找order_sender（不区分token_0/token_1）
 	let market_key = format!("{}{}{}", submit_order_message.symbol.event_id, common::consts::SYMBOL_SEPARATOR, submit_order_message.symbol.market_id);
 	let order_sender = event_manager.order_senders.get(&market_key).ok_or(anyhow::anyhow!("Order sender not found for market: {}", market_key))?;
-	let order = Order::new(
-		submit_order_message.order_id,
-		submit_order_message.symbol.clone(),
-		submit_order_message.side,
-		submit_order_message.order_type,
-		submit_order_message.quantity,
-		submit_order_message.price,
-		submit_order_message.user_id,
-		submit_order_message.privy_id,
-		submit_order_message.outcome_name,
-	)?;
-	if (order_sender.send(OrderBookControl::SubmitOrder(order)).await).is_err() {
+
+	// 直接发送 SubmitOrderMessage，不再构造 Order（Order 只在 submit_order 中构造限价单时使用）
+	if (order_sender.send(OrderBookControl::SubmitOrder(submit_order_message)).await).is_err() {
 		//error!("System busy: MatchEngine channel full for market {}, unable to submit order", market_key);
 		return Err(anyhow::anyhow!("System busy: MatchEngine for market {} is at full capacity", market_key));
 	}
@@ -486,6 +477,16 @@ pub async fn process_event_input_message(msg: EventInputMessage) {
 				error!("Failed to remove event: {}, error: {}", msg_id, e);
 			}
 		}
+		EventInputMessage::AddOneMarket(msg) => {
+			if let Err(e) = add_one_market(msg).await {
+				error!("Failed to add market: error: {}", e);
+			}
+		}
+		EventInputMessage::RemoveOneMarket(msg) => {
+			if let Err(e) = remove_one_market(msg).await {
+				error!("Failed to remove market: error: {}", e);
+			}
+		}
 		EventInputMessage::StopAllEvents(msg) => stop_all_events(msg.stop).await,
 		EventInputMessage::ResumeAllEvents(msg) => resume_all_events(msg.resume).await,
 	}
@@ -510,17 +511,17 @@ pub async fn add_event(msg: EngineMQEventCreate) -> anyhow::Result<()> {
 	// 创建退出信号的broadcast channel
 	let (exit_sender, _) = broadcast::channel(1);
 
-	// 创建JoinSet来管理所有MatchEngine任务
-	let mut join_set = JoinSet::new();
 	let mut order_senders = HashMap::new();
+	let mut market_exit_signals = HashMap::new();
 
 	// 为每个market创建一个MatchEngine（处理token_0和token_1两个结果）
 	for (market_id_str, market) in &msg.markets {
 		// 解析 market_id 从 String 到 i16
 		let market_id: i16 = market_id_str.parse().map_err(|e| anyhow::anyhow!("Invalid market_id '{}': {}", market_id_str, e))?;
 
-		// 创建exit_receiver
-		let exit_receiver = exit_sender.subscribe();
+		// 为每个market创建独立的退出信号（oneshot）
+		let (market_exit_sender, market_exit_receiver) = tokio::sync::oneshot::channel();
+		let global_exit_receiver = exit_sender.subscribe();
 
 		// 从market中获取token_ids
 		let token_ids = if market.token_ids.len() >= 2 {
@@ -529,43 +530,26 @@ pub async fn add_event(msg: EngineMQEventCreate) -> anyhow::Result<()> {
 			return Err(anyhow::anyhow!("Option {} must have at least 2 token_ids", market_id));
 		};
 
-		// 创建MatchEngine（一个market一个MatchEngine）
-		let (mut engine, order_sender) = MatchEngine::new(msg.event_id, market_id, token_ids, max_order_count, exit_receiver);
+		// 创建MatchEngine（使用global_exit_receiver）
+		// 创建MatchEngine（使用global_exit_receiver和market_exit_receiver）
+		let (mut engine, order_sender) = MatchEngine::new(msg.event_id, market_id, token_ids, max_order_count, global_exit_receiver, market_exit_receiver);
 
-		// 启动MatchEngine的run任务并加入JoinSet
-		join_set.spawn(async move {
+		// 启动MatchEngine的run任务
+		tokio::spawn(async move {
 			engine.run().await;
 		});
 
-		// 使用event_id和market_id的组合作为key（不区分token_0/token_1，因为一个MatchEngine处理两个结果）
+		// 使用event_id和market_id的组合作为key
 		let market_key = format!("{}{}{}", msg.event_id, common::consts::SYMBOL_SEPARATOR, market_id);
-		order_senders.insert(market_key, order_sender);
+		order_senders.insert(market_key.clone(), order_sender);
+		market_exit_signals.insert(market_key, market_exit_sender);
 	}
 
-	// 创建监控任务，等待所有MatchEngine任务完成
-	let event_id_for_monitor = msg.event_id;
-	tokio::spawn(async move {
-		// 等待所有任务完成
-		while let Some(result) = join_set.join_next().await {
-			match result {
-				Ok(_) => {
-					// 任务正常完成
-				}
-				Err(e) => {
-					error!("MatchEngine task panicked for event {}: {}", event_id_for_monitor, e);
-				}
-			}
-		}
-
-		info!("All MatchEngine tasks for event {} have completed", event_id_for_monitor);
-	});
-
-	// 至此各个撮合引擎以及监控task已经运行
-
 	// 创建EventManager
-	let event_manager = EventManager { event_id: msg.event_id, order_senders, exit_signal: exit_sender, end_timestamp: msg.end_date };
+	let event_manager = EventManager { event_id: msg.event_id, order_senders, exit_signal: exit_sender, market_exit_signals, end_timestamp: msg.end_date };
 
 	// 将EventManager存储到全局Manager中
+
 	let manager = get_manager().write().await;
 	let mut event_managers = manager.event_managers.write().await;
 	event_managers.insert(msg.event_id, event_manager);
@@ -597,9 +581,6 @@ pub async fn remove_event(event_id: i64) -> anyhow::Result<()> {
 			if let Err(e) = publish_order_change_to_store(OrderChangeEvent::EventRemoved(event_id)) {
 				error!("Failed to publish event removed event to store: {}", e);
 			}
-
-			// 注意：监控任务会在后台等待所有MatchEngine任务完成
-			// 我们不需要在这里等待，因为监控任务会自动处理
 		}
 		None => {
 			return Err(anyhow::anyhow!("Event {} not found", event_id));
@@ -626,6 +607,92 @@ pub async fn resume_all_events(resume: bool) {
 	let mut manager = get_manager().write().await;
 	manager.stop = false;
 	info!("All events resumed");
+}
+
+/// 在已有Event下动态添加单个Market
+pub async fn add_one_market(msg: common::engine_types::AddOneMarketMessage) -> anyhow::Result<()> {
+	info!("Match engine adding market: event_id={}, market_id={}", msg.event_id, msg.market.market_id);
+
+	let manager = get_manager().read().await;
+	let mut event_managers = manager.event_managers.write().await;
+
+	// 获取EventManager
+	let event_manager = event_managers.get_mut(&msg.event_id).ok_or(anyhow::anyhow!("Event {} not found", msg.event_id))?;
+
+	// 检查market是否已存在
+	let market_key = format!("{}{}{}", msg.event_id, common::consts::SYMBOL_SEPARATOR, msg.market.market_id);
+	if event_manager.order_senders.contains_key(&market_key) {
+		info!("Market {} already exists in event {}, skipping", msg.market.market_id, msg.event_id);
+		return Ok(());
+	}
+
+	let config = crate::config::get_config();
+	let max_order_count = config.engine.engine_max_order_count;
+
+	// 为该market创建独立的退出信号（oneshot）
+	let (market_exit_sender, market_exit_receiver) = tokio::sync::oneshot::channel();
+	let global_exit_receiver = event_manager.exit_signal.subscribe();
+
+	// 从market中获取token_ids
+	let token_ids = if msg.market.token_ids.len() >= 2 {
+		(msg.market.token_ids[0].clone(), msg.market.token_ids[1].clone())
+	} else {
+		return Err(anyhow::anyhow!("Market {} must have at least 2 token_ids", msg.market.market_id));
+	};
+
+	// 创建MatchEngine
+	// 创建MatchEngine（使用global_exit_receiver和market_exit_receiver）
+	let (mut engine, order_sender) = crate::engine::MatchEngine::new(msg.event_id, msg.market.market_id, token_ids, max_order_count, global_exit_receiver, market_exit_receiver);
+
+	// 启动MatchEngine的run任务
+	tokio::spawn(async move {
+		engine.run().await;
+	});
+
+	// 添加到order_senders和market_exit_signals
+	event_manager.order_senders.insert(market_key.clone(), order_sender);
+	event_manager.market_exit_signals.insert(market_key, market_exit_sender);
+
+	// 通知 store 添加市场
+	if let Err(e) = crate::output::publish_order_change_to_store(common::store_types::OrderChangeEvent::MarketAdded { event_id: msg.event_id, market: msg.market.clone() }) {
+		error!("Failed to publish market added event to store: {}", e);
+	}
+
+	info!("Market {} added to event {}", msg.market.market_id, msg.event_id);
+	Ok(())
+}
+
+/// 移除Event下的单个Market（关闭并取消所有订单）
+pub async fn remove_one_market(msg: common::engine_types::RemoveOneMarketMessage) -> anyhow::Result<()> {
+	info!("Match engine removing market: event_id={}, market_id={}", msg.event_id, msg.market_id);
+
+	let manager = get_manager().read().await;
+	let mut event_managers = manager.event_managers.write().await;
+
+	// 获取EventManager
+	let event_manager = event_managers.get_mut(&msg.event_id).ok_or(anyhow::anyhow!("Event {} not found", msg.event_id))?;
+
+	// 移除market的order_sender（这会导致该market的MatchEngine无法接收新订单）
+	let market_key = format!("{}{}{}", msg.event_id, common::consts::SYMBOL_SEPARATOR, msg.market_id);
+	if event_manager.order_senders.remove(&market_key).is_none() {
+		return Err(anyhow::anyhow!("Market {} not found in event {}", msg.market_id, msg.event_id));
+	}
+
+	// 发送market级别的退出信号给该market的MatchEngine task
+	if let Some(market_exit_sender) = event_manager.market_exit_signals.remove(&market_key) {
+		let _ = market_exit_sender.send(());
+		info!("Sent exit signal to market {} in event {}", msg.market_id, msg.event_id);
+	}
+
+	// join_set的监控任务会自动检测到task完成
+
+	// 通知 store 移除市场
+	if let Err(e) = crate::output::publish_order_change_to_store(common::store_types::OrderChangeEvent::MarketRemoved { event_id: msg.event_id, market_id: msg.market_id }) {
+		error!("Failed to publish market removed event to store: {}", e);
+	}
+
+	info!("Market {} removed from event {} (order_sender removed, exit signal sent)", msg.market_id, msg.event_id);
+	Ok(())
 }
 
 pub async fn start_input_consumer() -> anyhow::Result<()> {

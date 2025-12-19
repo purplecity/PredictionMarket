@@ -160,6 +160,14 @@ async fn process_message(value: &str) -> anyhow::Result<()> {
 			info!("TEST_EVENT: API service received EventClose from api_mq_stream, event_id: {}", close.event_id);
 			cache::remove_event(close.event_id).await;
 		}
+		ApiEventMqMessage::MarketAdd(market_add) => {
+			info!("Received market add: event_id={}, market_id={}", market_add.event_id, market_add.market_id);
+			cache::add_market_to_event(market_add.event_id, market_add.market_id, market_add.market).await;
+		}
+		ApiEventMqMessage::MarketClose(market_close) => {
+			info!("Received market close: event_id={}, market_id={}", market_close.event_id, market_close.market_id);
+			cache::remove_market_from_event(market_close.event_id, market_close.market_id).await;
+		}
 	}
 
 	Ok(())

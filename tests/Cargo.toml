@@ -13,6 +13,7 @@ serde_json = { workspace = true }
 sqlx = { workspace = true }
 uuid = { workspace = true }
 dotenv = { workspace = true }
+chrono = { workspace = true }
 
 # Internal crates
 common = { path = "../common" }

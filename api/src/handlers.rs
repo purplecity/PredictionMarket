@@ -10,7 +10,7 @@ use {
 		internal_service::{ReqGetGoogleImageSign, ReqGetIpInfo, ReqGetPrivyUserInfo, ResGetGoogleImageSign, get_google_image_sign, get_ip_info, get_privy_user_info},
 		rpc_client,
 		server::ClientInfo,
-		singleflight::{get_event_detail_group, get_events_group, get_topics_group},
+		singleflight::{get_event_detail_group, get_events_group, get_market_validation_group, get_topics_group},
 	},
 	axum::{
 		extract::{Extension, Query},
@@ -21,8 +21,7 @@ use {
 		consts::{NEW_USER_MSG_KEY, NEW_USER_STREAM, ORDER_INPUT_MSG_KEY, ORDER_INPUT_STREAM},
 		depth_types::CacheMarketPriceInfo,
 		engine_types::{CancelOrderMessage, OrderInputMessage, OrderSide as EngineOrderSide, OrderStatus, OrderType, PredictionSymbol, SubmitOrderMessage},
-		event_types::CacheEventVolume,
-		key::{PRICE_CACHE_KEY, VOLUME_CACHE_KEY, market_field},
+		key::{PRICE_CACHE_KEY, market_field},
 		model::{Events, SignatureOrderMsg, Users},
 		redis_pool,
 	},
@@ -167,17 +166,36 @@ pub async fn handle_place_order(Extension(client_info): Extension<ClientInfo>, J
 		}
 	};
 
-	// 2. 获取市场信息
-	let market = match cache::get_market(params.event_id, params.market_id).await {
+	// 2. 获取市场信息并检查是否关闭（使用 singleflight 避免重复查询）
+	let singleflight_key = format!("{}|{}", params.event_id, params.market_id);
+	let market_result = get_market_validation_group()
+		.await
+		.work(&singleflight_key, async {
+			// 这里会检查缓存、数据库以及market的closed状态
+			cache::get_market_and_check_closed(params.event_id, params.market_id).await
+		})
+		.await;
+
+	let market = match market_result {
 		Ok(m) => m,
-		Err(CacheError::EventNotFound(_)) => {
-			return Ok(Json(ApiResponse::error(ApiErrorCode::EventNotFound)));
+		Err(Some(e)) => {
+			// Leader failed - 直接匹配 CacheError 枚举
+			match e {
+				CacheError::EventNotFoundOrClosed(_) => {
+					return Ok(Json(ApiResponse::error(ApiErrorCode::EventNotFoundOrClosed)));
+				}
+				CacheError::MarketNotFoundOrClosed(..) => {
+					return Ok(Json(ApiResponse::error(ApiErrorCode::MarketNotFoundOrClosed)));
+				}
+				_ => {
+					tracing::error!("request_id={}, privy_id={} - Failed to get market from cache: {}", client_info.request_id, privy_id, e);
+					return Err(InternalError);
+				}
+			}
 		}
-		Err(CacheError::MarketNotFound(..)) => {
-			return Ok(Json(ApiResponse::error(ApiErrorCode::MarketNotFound)));
-		}
-		Err(e) => {
-			tracing::error!("request_id={}, privy_id={} - Failed to get market from cache: {}", client_info.request_id, privy_id, e);
+		Err(None) => {
+			// Leader dropped
+			tracing::error!("request_id={}, privy_id={} - Singleflight leader dropped", client_info.request_id, privy_id);
 			return Err(InternalError);
 		}
 	};
@@ -236,6 +254,30 @@ pub async fn handle_place_order(Extension(client_info): Extension<ClientInfo>, J
 		token_id: params.token_id.clone(),
 	};
 
+	// 根据订单类型决定 gRPC 请求的 quantity 和 volume
+	let (rpc_quantity, rpc_volume) = match engine_order_type {
+		OrderType::Limit => {
+			// 限价单：正常传递
+			match engine_side {
+				EngineOrderSide::Buy => (token_amount.to_string(), volume.to_string()),
+				EngineOrderSide::Sell => (token_amount.to_string(), "0".to_string()),
+			}
+		}
+		OrderType::Market => {
+			// 市价单：根据买卖方向设置
+			match engine_side {
+				EngineOrderSide::Buy => {
+					// 市价买单：quantity=0, volume=maker_amount
+					("0".to_string(), maker_amount.to_string())
+				}
+				EngineOrderSide::Sell => {
+					// 市价卖单：quantity=maker_amount, volume=0
+					(maker_amount.to_string(), "0".to_string())
+				}
+			}
+		}
+	};
+
 	let create_order_req = proto::CreateOrderRequest {
 		user_id,
 		event_id: params.event_id,
@@ -245,8 +287,8 @@ pub async fn handle_place_order(Extension(client_info): Extension<ClientInfo>, J
 		order_side: proto_side.to_string(),
 		order_type: proto_order_type.to_string(),
 		price: params.price.clone(),
-		quantity: token_amount.to_string(),
-		volume: volume.to_string(),
+		quantity: rpc_quantity,
+		volume: rpc_volume,
 		signature_order_msg: Some(proto::SignatureOrderMsg {
 			expiration: signature_order_msg.expiration.clone(),
 			fee_rate_bps: signature_order_msg.fee_rate_bps.clone(),
@@ -285,13 +327,38 @@ pub async fn handle_place_order(Extension(client_info): Extension<ClientInfo>, J
 		}
 	};
 
+	// 7. 根据订单类型计算 volume_decimal 和 quantity_u64
+	// volume 不乘以精度，就是实际的 USDC 值
+	let (final_quantity_u64, volume_decimal) = if engine_order_type == OrderType::Market {
+		// 市价单
+		match engine_side {
+			EngineOrderSide::Buy => {
+				// 市价买单：quantity=0, volume=maker_amount（不乘以精度）
+				(0u64, maker_amount)
+			}
+			EngineOrderSide::Sell => {
+				// 市价卖单：quantity=已算好的quantity_u64, volume=0
+				(quantity_u64, Decimal::ZERO)
+			}
+		}
+	} else {
+		match engine_side {
+			EngineOrderSide::Buy => {
+				// 限价单：保持当前逻辑，volume 不乘以精度
+				(quantity_u64, volume)
+			}
+			EngineOrderSide::Sell => (quantity_u64, Decimal::ZERO),
+		}
+	};
+
 	let submit_order_msg = SubmitOrderMessage {
 		order_id: order_id.clone(),
 		symbol,
 		side: engine_side,
 		order_type: engine_order_type,
-		quantity: quantity_u64,
+		quantity: final_quantity_u64,
 		price: price_i32,
+		volume: volume_decimal,
 		user_id,
 		privy_id: privy_id.to_string(),
 		outcome_name: outcome_name.to_string(),
@@ -353,11 +420,12 @@ pub async fn handle_cancel_order(Extension(client_info): Extension<ClientInfo>, 
 		InternalError
 	})?;
 
-	let order: Option<common::model::Orders> = sqlx::query_as("SELECT * FROM orders WHERE id = $1 AND user_id = $2 AND (status = $3 OR status = $4)")
+	let order: Option<common::model::Orders> = sqlx::query_as("SELECT * FROM orders WHERE id = $1 AND user_id = $2 AND (status = $3 OR status = $4) AND order_type = $5")
 		.bind(order_uuid)
 		.bind(user_id)
 		.bind(OrderStatus::New)
 		.bind(OrderStatus::PartiallyFilled)
+		.bind(OrderType::Limit)
 		.fetch_optional(&read_pool)
 		.await
 		.map_err(|e| {
@@ -421,10 +489,11 @@ pub async fn handle_cancel_all_orders(Extension(client_info): Extension<ClientIn
 		InternalError
 	})?;
 
-	let orders: Vec<common::model::Orders> = sqlx::query_as("SELECT * FROM orders WHERE user_id = $1 AND (status = $2 OR status = $3)")
+	let orders: Vec<common::model::Orders> = sqlx::query_as("SELECT * FROM orders WHERE user_id = $1 AND (status = $2 OR status = $3) AND order_type = $4")
 		.bind(user_id)
 		.bind(OrderStatus::New)
 		.bind(OrderStatus::PartiallyFilled)
+		.bind(OrderType::Limit)
 		.fetch_all(&read_pool)
 		.await
 		.map_err(|e| {
@@ -877,7 +946,7 @@ pub async fn handle_event_detail(Query(params): Query<EventDetailRequest>) -> Re
 				.map_err(|e| anyhow::anyhow!(e))?
 				.ok_or_else(|| anyhow::anyhow!("Event not found"))?;
 
-			// 2. 获取价格信息和 volume 信息
+			// 2. 获取价格信息
 			let mut conn = redis_pool::get_cache_redis_connection().await.map_err(|e| anyhow::anyhow!(e))?;
 
 			// 收集需要查询的 price fields
@@ -894,9 +963,6 @@ pub async fn handle_event_detail(Query(params): Query<EventDetailRequest>) -> Re
 			let price_values: Vec<Option<String>> =
 				if !price_fields.is_empty() { conn.hget(PRICE_CACHE_KEY, &price_fields).await.unwrap_or_else(|_| vec![None; price_fields.len()]) } else { Vec::new() };
 
-			// 获取 volume 信息
-			let volume_value: Option<String> = conn.hget(VOLUME_CACHE_KEY, event_id.to_string()).await.unwrap_or(None);
-
 			// 构建 field -> price_info 映射
 			let mut price_map: std::collections::HashMap<String, CacheMarketPriceInfo> = std::collections::HashMap::new();
 			for (field, value) in price_fields.iter().zip(price_values.iter()) {
@@ -904,16 +970,6 @@ pub async fn handle_event_detail(Query(params): Query<EventDetailRequest>) -> Re
 					&& let Ok(info) = serde_json::from_str::<CacheMarketPriceInfo>(v)
 				{
 					price_map.insert(field.clone(), info);
-				}
-			}
-
-			// 构建 market_id -> volume 映射
-			let mut volume_map: std::collections::HashMap<i16, Decimal> = std::collections::HashMap::new();
-			if let Some(vol_json) = volume_value
-				&& let Ok(event_vol) = serde_json::from_str::<CacheEventVolume>(&vol_json)
-			{
-				for mv in event_vol.market_volumes {
-					volume_map.insert(mv.market_id, mv.volume.normalize());
 				}
 			}
 
@@ -946,14 +1002,12 @@ pub async fn handle_event_detail(Query(params): Query<EventDetailRequest>) -> Re
 					(Decimal::ZERO, Decimal::ZERO, Decimal::ZERO, Decimal::ZERO, Decimal::ZERO, Decimal::ZERO)
 				};
 
-				let market_volume = volume_map.get(&market_id_i16).cloned().unwrap_or(Decimal::ZERO);
-
 				markets.push(EventMarketDetail {
 					title: market.title.clone(),
 					question: market.question.clone(),
 					image: market.image.clone(),
 					market_id: market_id_i16,
-					volume: market_volume,
+					volume: market.volume.normalize(),
 					condition_id: market.condition_id.clone(),
 					parent_collection_id: market.parent_collection_id.clone(),
 					outcome_0_name: market.outcomes.first().cloned().unwrap_or_default(),
@@ -966,6 +1020,7 @@ pub async fn handle_event_detail(Query(params): Query<EventDetailRequest>) -> Re
 					outcome_0_best_ask,
 					outcome_1_best_bid,
 					outcome_1_best_ask,
+					closed: market.closed,
 					winner_outcome_name: market.win_outcome_name.clone(),
 					winner_outcome_token_id: market.win_outcome_token_id.clone(),
 				});

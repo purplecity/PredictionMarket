@@ -104,6 +104,8 @@ async fn process_message(json_str: &str) -> anyhow::Result<()> {
 	match message {
 		OnchainEventMessage::Create(event) => handle_event_create(event).await?,
 		OnchainEventMessage::Close(close) => handle_event_close(close).await?,
+		OnchainEventMessage::MarketAdd(market_add) => handle_market_add(market_add).await?,
+		OnchainEventMessage::MarketClose(market_close) => handle_market_close(market_close).await?,
 	}
 
 	Ok(())
@@ -124,6 +126,41 @@ async fn handle_event_close(close: common::event_types::MQEventClose) -> anyhow:
 	info!("TEST_EVENT: Onchain_msg service received EventClose from onchain_event_stream, event_id: {}", close.event_id);
 
 	// No special action needed for event close in onchain_msg service
+	// Cache remains valid for historical lookups
+
+	Ok(())
+}
+
+async fn handle_market_add(market_add: common::event_types::OnchainMQMarketAdd) -> anyhow::Result<()> {
+	info!("Handling MarketAdd: event_id={}, market_id={}", market_add.event_id, market_add.market.market_id);
+
+	// Update cache with new market information
+	let token_cache = cache::get_token_id_cache();
+	let condition_cache = cache::get_condition_id_cache();
+
+	let mut token_write = token_cache.write().await;
+	let mut condition_write = condition_cache.write().await;
+
+	let market = &market_add.market;
+
+	// Update condition_id cache
+	condition_write.insert(market.condition_id.clone(), (market_add.event_id, market.market_id, market.token_ids.clone()));
+
+	// Update token_id cache with outcome_name
+	for (idx, token_id) in market.token_ids.iter().enumerate() {
+		let outcome_name = market.outcomes.get(idx).cloned().unwrap_or_default();
+		token_write.insert(token_id.clone(), (market_add.event_id, market.market_id, outcome_name));
+	}
+
+	info!("Updated cache for market_add: event_id={}, market_id={}", market_add.event_id, market.market_id);
+
+	Ok(())
+}
+
+async fn handle_market_close(market_close: common::event_types::OnchainMQMarketClose) -> anyhow::Result<()> {
+	info!("Handling MarketClose: event_id={}, market_id={}, win_outcome={}", market_close.event_id, market_close.market_id, market_close.win_outcome_name);
+
+	// No special action needed for market close in onchain_msg service
 	// Cache remains valid for historical lookups
 
 	Ok(())

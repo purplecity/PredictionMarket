@@ -2,7 +2,7 @@ use {
 	crate::{
 		consts::EVENT_RESOLUTION_CHECK_INTERVAL_SECS,
 		db,
-		types::{EventClose, EventCreate},
+		types::{EventClose, EventCreate, MarketAdd, MarketClose},
 	},
 	chrono::Utc,
 	common::{
@@ -19,6 +19,9 @@ use {
 	tracing::{error, info},
 };
 
+/// 类型别名：用于简化复杂类型定义
+type EventQueryResult = (i64, bool, sqlx::types::Json<HashMap<String, EventMarketModel>>);
+
 /// Event MQ 消息类型枚举（用于统一处理消息）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "types")]
@@ -27,6 +30,10 @@ enum EventMqMessage {
 	EventCreate(EventCreate),
 	#[serde(rename = "EventClose")]
 	EventClose(EventClose),
+	#[serde(rename = "MarketAdd")]
+	MarketAdd(MarketAdd),
+	#[serde(rename = "MarketClose")]
+	MarketClose(MarketClose),
 }
 
 static SHUTDOWN: OnceCell<broadcast::Sender<()>> = OnceCell::const_new();
@@ -184,6 +191,12 @@ async fn handle_message(value: &str) -> anyhow::Result<()> {
 		EventMqMessage::EventClose(event_close) => {
 			handle_event_close(event_close).await?;
 		}
+		EventMqMessage::MarketAdd(market_add) => {
+			handle_market_add(market_add).await?;
+		}
+		EventMqMessage::MarketClose(market_close) => {
+			handle_market_close(market_close).await?;
+		}
 	}
 
 	Ok(())
@@ -280,6 +293,9 @@ async fn handle_event_create(event_create: EventCreate) -> anyhow::Result<()> {
 			token_ids: token_ids.clone(),
 			win_outcome_name: String::new(),     // 初始为空
 			win_outcome_token_id: String::new(), // 初始为空
+			closed: false,                       // 初始未关闭
+			closed_at: None,                     // 初始为空
+			volume: rust_decimal::Decimal::ZERO, // 初始交易量为0
 		};
 
 		// 构造 ApiMQEventMarket
@@ -438,7 +454,44 @@ fn sort_outcomes_and_token_ids(outcome_names: &[String], token_ids: &[String]) -
 async fn handle_event_close(event_close: EventClose) -> anyhow::Result<()> {
 	info!("TEST_EVENT: Event service received EventClose message, event_identifier: {}", event_close.event_identifier);
 
-	// 1. 更新数据库（同时更新 closed 和 markets)
+	// 1. 检查是否所有市场都已结束
+	// 从数据库查询当前 event 的所有 markets
+	let pool = db::get_db_pool()?;
+	let markets_json: serde_json::Value = sqlx::query_scalar("SELECT markets FROM events WHERE event_identifier = $1").bind(&event_close.event_identifier).fetch_one(&pool).await.map_err(|e| {
+		error!("EventClose: Failed to query event markets: {}, event_identifier: {}", e, event_close.event_identifier);
+		e
+	})?;
+
+	let markets_map: std::collections::HashMap<String, common::model::EventMarket> = serde_json::from_value(markets_json).map_err(|e| {
+		error!("EventClose: Failed to parse markets JSON: {}, event_identifier: {}", e, event_close.event_identifier);
+		e
+	})?;
+
+	// 收集所有已经关闭的 market_identifier
+	let mut closed_market_identifiers: std::collections::HashSet<String> = markets_map.values().filter(|m| m.closed).map(|m| m.market_identifier.clone()).collect();
+
+	// 将请求中的 market_identifier 加入集合
+	for result in &event_close.markets_result {
+		closed_market_identifiers.insert(result.market_identifier.clone());
+	}
+
+	// 收集所有 market 的 market_identifier
+	let all_market_identifiers: std::collections::HashSet<String> = markets_map.values().map(|m| m.market_identifier.clone()).collect();
+
+	// 检查：已关闭的 + 请求中的 是否覆盖了所有 markets
+	if closed_market_identifiers != all_market_identifiers {
+		let missing: Vec<_> = all_market_identifiers.difference(&closed_market_identifiers).collect();
+		error!(
+			"EventClose: Not all markets are closed. Total markets: {}, closed+request: {}, missing: {:?}, event_identifier: {}",
+			all_market_identifiers.len(),
+			closed_market_identifiers.len(),
+			missing,
+			event_close.event_identifier
+		);
+		return Err(anyhow::anyhow!("Not all markets are closed"));
+	}
+
+	// 2. 更新数据库（同时更新 closed 和 markets)
 	let markets_results: Vec<(String, String, String)> =
 		event_close.markets_result.iter().map(|result| (result.market_identifier.clone(), result.win_outcome_token_id.clone(), result.win_outcome_name.clone())).collect();
 
@@ -557,4 +610,217 @@ async fn resolution_check_task(mut receiver: mpsc::UnboundedReceiver<i64>) {
 			}
 		}
 	}
+}
+
+/// 处理单个 Market 添加
+async fn handle_market_add(market_add: MarketAdd) -> anyhow::Result<()> {
+	info!("Event service received MarketAdd message, event_identifier: {}, market_identifier: {}", market_add.event_identifier, market_add.market.market_identifier);
+
+	// 1. 验证 market
+	if let Err(e) = market_add.market.validate() {
+		error!("MarketAdd: market {} validation failed: {}, event_identifier: {}", market_add.market.market_identifier, e, market_add.event_identifier);
+		return Err(anyhow::anyhow!("Market validation failed: {}", e));
+	}
+
+	// 2. 从数据库查询 event_id、closed 和当前最大 market_id
+	let pool = db::get_db_pool()?;
+	let result: Option<EventQueryResult> =
+		sqlx::query_as("SELECT id, closed, markets FROM events WHERE event_identifier = $1").bind(&market_add.event_identifier).fetch_optional(&pool).await.map_err(|e| {
+			error!("MarketAdd: Failed to query event: {}, event_identifier: {}", e, market_add.event_identifier);
+			e
+		})?;
+
+	let (event_id, event_closed, markets_json) = result.ok_or_else(|| {
+		error!("MarketAdd: Event not found, event_identifier: {}", market_add.event_identifier);
+		anyhow::anyhow!("Event not found: {}", market_add.event_identifier)
+	})?;
+
+	// 3. 检查 event 是否已经关闭
+	if event_closed {
+		error!("MarketAdd: Event already closed, event_identifier: {}", market_add.event_identifier);
+		return Err(anyhow::anyhow!("Event already closed"));
+	}
+
+	// 4. 计算新的 market_id（现有最大 market_id + 1）
+	let max_market_id: i16 = markets_json.0.keys().filter_map(|k| k.parse::<i16>().ok()).max().unwrap_or(0);
+	let new_market_id = max_market_id + 1;
+	let market_id_str = new_market_id.to_string();
+
+	// 5. 排序 outcomes 和 token_ids
+	let (outcomes, token_ids) = sort_outcomes_and_token_ids(&market_add.market.outcome_names, &market_add.market.token_ids);
+
+	// 6. 构造 outcome_info
+	let mut outcome_info = HashMap::new();
+	for (token_id, outcome_name) in token_ids.iter().zip(outcomes.iter()) {
+		outcome_info.insert(token_id.clone(), outcome_name.clone());
+	}
+
+	// 7. 构造 EventMarketModel
+	let db_market = EventMarketModel {
+		parent_collection_id: market_add.market.parent_collection_id.clone(),
+		condition_id: market_add.market.condition_id.clone(),
+		id: new_market_id,
+		market_identifier: market_add.market.market_identifier.clone(),
+		question: market_add.market.question.clone(),
+		slug: market_add.market.slug.clone(),
+		title: market_add.market.title.clone(),
+		image: market_add.market.image.clone().unwrap_or_default(),
+		outcomes: outcomes.clone(),
+		token_ids: token_ids.clone(),
+		win_outcome_name: String::new(),
+		win_outcome_token_id: String::new(),
+		closed: false,
+		closed_at: None,
+		volume: rust_decimal::Decimal::ZERO, // 初始交易量为0
+	};
+
+	// 8. 使用 JSONB 操作符直接在数据库中插入单个 market
+	sqlx::query("UPDATE events SET markets = jsonb_set(markets, $1::text[], $2::jsonb) WHERE id = $3")
+		.bind(format!("{{{}}}", market_id_str))
+		.bind(sqlx::types::Json(&db_market))
+		.bind(event_id)
+		.execute(&pool)
+		.await
+		.map_err(|e| {
+			error!("MarketAdd: Failed to insert market into event: {}, event_id: {}, market_id: {}", e, event_id, new_market_id);
+			e
+		})?;
+
+	info!("Market added to event: event_id={}, market_id={}, market_identifier={}", event_id, new_market_id, market_add.market.market_identifier);
+
+	// 9. 推送到 ENGINE stream
+	let engine_market = EngineMQEventMarket { market_id: new_market_id, outcomes: outcomes.clone(), token_ids: token_ids.clone() };
+	let engine_msg = EventInputMessage::AddOneMarket(common::engine_types::AddOneMarketMessage { event_id, market: engine_market });
+	publish_to_engine_stream(EVENT_INPUT_STREAM, EVENT_INPUT_MSG_KEY, &engine_msg).await.map_err(|e| {
+		error!("MarketAdd: Failed to publish to ENGINE stream: {}, event_id: {}, market_id: {}", e, event_id, new_market_id);
+		e
+	})?;
+
+	// 10. 推送到 ONCHAIN stream
+	let onchain_market = OnchainMQEventMarket { market_id: new_market_id, condition_id: market_add.market.condition_id.clone(), token_ids: token_ids.clone(), outcomes: outcomes.clone() };
+	let onchain_msg = OnchainEventMessage::MarketAdd(common::event_types::OnchainMQMarketAdd { event_id, market: onchain_market });
+	publish_to_stream(ONCHAIN_EVENT_STREAM, ONCHAIN_EVENT_MSG_KEY, &onchain_msg).await.map_err(|e| {
+		error!("MarketAdd: Failed to publish to ONCHAIN stream: {}, event_id: {}, market_id: {}", e, event_id, new_market_id);
+		e
+	})?;
+
+	// 11. 推送到 API stream
+	let api_market = ApiMQEventMarket {
+		parent_collection_id: market_add.market.parent_collection_id.clone(),
+		market_id: new_market_id,
+		condition_id: market_add.market.condition_id.clone(),
+		market_identifier: market_add.market.market_identifier.clone(),
+		question: market_add.market.question.clone(),
+		slug: market_add.market.slug.clone(),
+		title: market_add.market.title.clone(),
+		image: market_add.market.image.clone().unwrap_or_default(),
+		outcome_info: outcome_info.clone(),
+		outcome_names: outcomes.clone(),
+		outcome_token_ids: token_ids.clone(),
+	};
+	let api_msg = ApiEventMqMessage::MarketAdd(Box::new(common::event_types::ApiMQMarketAdd { event_id, market_id: new_market_id, market: api_market }));
+	publish_to_stream(API_MQ_STREAM, API_MQ_MSG_KEY, &api_msg).await.map_err(|e| {
+		error!("MarketAdd: Failed to publish to API stream: {}, event_id: {}, market_id: {}", e, event_id, new_market_id);
+		e
+	})?;
+
+	info!("MarketAdd: Successfully added market and pushed to all streams, event_id: {}, market_id: {}", event_id, new_market_id);
+
+	Ok(())
+}
+
+/// 处理单个 Market 关闭
+async fn handle_market_close(market_close: MarketClose) -> anyhow::Result<()> {
+	info!("Event service received MarketClose message, event_identifier: {}, market_identifier: {}", market_close.event_identifier, market_close.market_result.market_identifier);
+
+	// 1. 从数据库查询 event_id 和 markets
+	let pool = db::get_db_pool()?;
+	let result: Option<(i64, sqlx::types::Json<HashMap<String, EventMarketModel>>)> =
+		sqlx::query_as("SELECT id, markets FROM events WHERE event_identifier = $1").bind(&market_close.event_identifier).fetch_optional(&pool).await.map_err(|e| {
+			error!("MarketClose: Failed to query event: {}, event_identifier: {}", e, market_close.event_identifier);
+			e
+		})?;
+
+	let (event_id, markets_json) = result.ok_or_else(|| {
+		error!("MarketClose: Event not found, event_identifier: {}", market_close.event_identifier);
+		anyhow::anyhow!("Event not found: {}", market_close.event_identifier)
+	})?;
+
+	// 2. 查找 market_id
+	let market_id = markets_json.0.iter().find(|(_, m)| m.market_identifier == market_close.market_result.market_identifier).and_then(|(id_str, _)| id_str.parse::<i16>().ok()).ok_or_else(|| {
+		error!("MarketClose: Market not found, market_identifier: {}", market_close.market_result.market_identifier);
+		anyhow::anyhow!("Market not found: {}", market_close.market_result.market_identifier)
+	})?;
+
+	let market_id_str = market_id.to_string();
+	let closed_at = Utc::now();
+
+	// 3. 使用 JSONB 操作符直接在数据库中更新 market 的多个字段
+	sqlx::query(
+		r#"
+		UPDATE events
+		SET markets = jsonb_set(
+			jsonb_set(
+				jsonb_set(
+					jsonb_set(
+						markets,
+						ARRAY[$1, 'win_outcome_name']::text[],
+						to_jsonb($2::text)
+					),
+					ARRAY[$1, 'win_outcome_token_id']::text[],
+					to_jsonb($3::text)
+				),
+				ARRAY[$1, 'closed']::text[],
+				to_jsonb($4::boolean)
+			),
+			ARRAY[$1, 'closed_at']::text[],
+			to_jsonb($5::timestamptz)
+		)
+		WHERE id = $6
+		"#,
+	)
+	.bind(&market_id_str)
+	.bind(&market_close.market_result.win_outcome_name)
+	.bind(&market_close.market_result.win_outcome_token_id)
+	.bind(true)
+	.bind(closed_at)
+	.bind(event_id)
+	.execute(&pool)
+	.await
+	.map_err(|e| {
+		error!("MarketClose: Failed to update market: {}, event_id: {}, market_id: {}", e, event_id, market_id);
+		e
+	})?;
+
+	info!("Market closed: event_id={}, market_id={}, market_identifier={}", event_id, market_id, market_close.market_result.market_identifier);
+
+	// 5. 推送到 ENGINE stream
+	let engine_msg = EventInputMessage::RemoveOneMarket(common::engine_types::RemoveOneMarketMessage { event_id, market_id });
+	publish_to_engine_stream(EVENT_INPUT_STREAM, EVENT_INPUT_MSG_KEY, &engine_msg).await.map_err(|e| {
+		error!("MarketClose: Failed to publish to ENGINE stream: {}, event_id: {}, market_id: {}", e, event_id, market_id);
+		e
+	})?;
+
+	// 6. 推送到 ONCHAIN stream
+	let onchain_msg = OnchainEventMessage::MarketClose(common::event_types::OnchainMQMarketClose {
+		event_id,
+		market_id,
+		win_outcome_token_id: market_close.market_result.win_outcome_token_id.clone(),
+		win_outcome_name: market_close.market_result.win_outcome_name.clone(),
+	});
+	publish_to_stream(ONCHAIN_EVENT_STREAM, ONCHAIN_EVENT_MSG_KEY, &onchain_msg).await.map_err(|e| {
+		error!("MarketClose: Failed to publish to ONCHAIN stream: {}, event_id: {}, market_id: {}", e, event_id, market_id);
+		e
+	})?;
+
+	// 7. 推送到 API stream
+	let api_msg = ApiEventMqMessage::MarketClose(common::event_types::ApiMQMarketClose { event_id, market_id });
+	publish_to_stream(API_MQ_STREAM, API_MQ_MSG_KEY, &api_msg).await.map_err(|e| {
+		error!("MarketClose: Failed to publish to API stream: {}, event_id: {}, market_id: {}", e, event_id, market_id);
+		e
+	})?;
+
+	info!("MarketClose: Successfully closed market and pushed to all streams, event_id: {}, market_id: {}", event_id, market_id);
+
+	Ok(())
 }

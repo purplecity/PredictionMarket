@@ -1,7 +1,7 @@
 use {
 	crate::{
 		engine_types::{Order, PredictionSymbol},
-		event_types::EngineMQEventCreate,
+		event_types::{EngineMQEventCreate, EngineMQEventMarket},
 	},
 	chrono::Utc,
 	serde::{Deserialize, Serialize},
@@ -23,6 +23,10 @@ pub enum OrderChangeEvent {
 	EventAdded(EngineMQEventCreate),
 	/// 市场移除（市场到期或被删除时发送）
 	EventRemoved(i64),
+	/// 单个Market添加（在已有Event下添加Market）
+	MarketAdded { event_id: i64, market: EngineMQEventMarket },
+	/// 单个Market移除（关闭Event下的Market）
+	MarketRemoved { event_id: i64, market_id: i16 },
 	/// 订单或撮合操作导致的 update_id 更新（用于同步每个 market 的最新 update_id）
 	MarketUpdateId { event_id: i64, market_id: i16, update_id: u64 },
 }

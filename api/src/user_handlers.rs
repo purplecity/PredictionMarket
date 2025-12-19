@@ -18,7 +18,7 @@ use {
 	common::{
 		consts::USDC_TOKEN_ID,
 		depth_types::CacheMarketPriceInfo,
-		engine_types::OrderStatus,
+		engine_types::{OrderStatus, OrderType},
 		key::{DEPTH_CACHE_KEY, PRICE_CACHE_KEY, market_field},
 		model::{AssetHistoryType, Events, OperationHistory, Orders, Positions},
 		redis_pool,
@@ -139,8 +139,10 @@ pub async fn handle_portfolio_value(Extension(client_info): Extension<ClientInfo
 		for pos in &non_usdc_positions {
 			if let Some(event_id) = pos.event_id
 				&& let Some(event) = event_map.get(&event_id)
+				&& let Some(market_id) = pos.market_id
+				&& let Some(market) = event.markets.get(&market_id.to_string())
 			{
-				if event.closed {
+				if market.closed {
 					closed_positions.push(pos);
 				} else {
 					open_positions.push(pos);
@@ -568,11 +570,11 @@ async fn handle_small_positions(
 		let avg_price = pos.avg_price.unwrap_or(Decimal::ZERO);
 
 		// 计算当前价格 (Decimal)
-		let current_price_decimal = if event.closed {
-			// closed event: 赢家价格为 1，输家为 0
+		let current_price_decimal = if market.closed {
+			// closed market: 赢家价格为 1，输家为 0
 			if pos.token_id == market.win_outcome_token_id { Decimal::ONE } else { Decimal::ZERO }
 		} else {
-			// open event: 从价格缓存获取
+			// open market: 从价格缓存获取
 			let field = market_field(event_id, market_id);
 			if let Some(price_info) = price_map.get(&field)
 				&& let Some(token_price) = price_info.prices.get(&pos.token_id)
@@ -1186,10 +1188,10 @@ pub async fn handle_open_orders(Extension(client_info): Extension<ClientInfo>, Q
 
 	// 查询总数
 	let count_sql = match (has_event_filter, has_market_filter) {
-		(true, true) => "SELECT COUNT(*) FROM orders WHERE user_id = $1 AND status = ANY($2) AND event_id = $3 AND market_id = $4",
-		(true, false) => "SELECT COUNT(*) FROM orders WHERE user_id = $1 AND status = ANY($2) AND event_id = $3",
-		(false, true) => "SELECT COUNT(*) FROM orders WHERE user_id = $1 AND status = ANY($2) AND market_id = $3",
-		(false, false) => "SELECT COUNT(*) FROM orders WHERE user_id = $1 AND status = ANY($2)",
+		(true, true) => "SELECT COUNT(*) FROM orders WHERE user_id = $1 AND status = ANY($2) AND event_id = $3 AND market_id = $4 AND order_type = $5",
+		(true, false) => "SELECT COUNT(*) FROM orders WHERE user_id = $1 AND status = ANY($2) AND event_id = $3 AND order_type = $4",
+		(false, true) => "SELECT COUNT(*) FROM orders WHERE user_id = $1 AND status = ANY($2) AND market_id = $3 AND order_type = $4",
+		(false, false) => "SELECT COUNT(*) FROM orders WHERE user_id = $1 AND status = ANY($2) AND order_type = $3",
 	};
 
 	let total: i64 = match (has_event_filter, has_market_filter) {
@@ -1199,6 +1201,7 @@ pub async fn handle_open_orders(Extension(client_info): Extension<ClientInfo>, Q
 				.bind(&statuses)
 				.bind(params.event_id.expect("event_id checked"))
 				.bind(params.market_id.expect("market_id checked"))
+				.bind(OrderType::Limit)
 				.fetch_one(&read_pool)
 				.await
 				.map_err(|e| {
@@ -1207,19 +1210,19 @@ pub async fn handle_open_orders(Extension(client_info): Extension<ClientInfo>, Q
 				})?
 		}
 		(true, false) => {
-			sqlx::query_scalar(count_sql).bind(user_id).bind(&statuses).bind(params.event_id.expect("event_id checked")).fetch_one(&read_pool).await.map_err(|e| {
+			sqlx::query_scalar(count_sql).bind(user_id).bind(&statuses).bind(params.event_id.expect("event_id checked")).bind(OrderType::Limit).fetch_one(&read_pool).await.map_err(|e| {
 				tracing::error!("request_id={}, privy_id={} - Failed to query open orders count: {}", client_info.request_id, privy_id, e);
 				InternalError
 			})?
 		}
 		(false, true) => {
-			sqlx::query_scalar(count_sql).bind(user_id).bind(&statuses).bind(params.market_id.expect("market_id checked")).fetch_one(&read_pool).await.map_err(|e| {
+			sqlx::query_scalar(count_sql).bind(user_id).bind(&statuses).bind(params.market_id.expect("market_id checked")).bind(OrderType::Limit).fetch_one(&read_pool).await.map_err(|e| {
 				tracing::error!("request_id={}, privy_id={} - Failed to query open orders count: {}", client_info.request_id, privy_id, e);
 				InternalError
 			})?
 		}
 		(false, false) => {
-			sqlx::query_scalar(count_sql).bind(user_id).bind(&statuses).fetch_one(&read_pool).await.map_err(|e| {
+			sqlx::query_scalar(count_sql).bind(user_id).bind(&statuses).bind(OrderType::Limit).fetch_one(&read_pool).await.map_err(|e| {
 				tracing::error!("request_id={}, privy_id={} - Failed to query open orders count: {}", client_info.request_id, privy_id, e);
 				InternalError
 			})?
@@ -1232,10 +1235,15 @@ pub async fn handle_open_orders(Extension(client_info): Extension<ClientInfo>, Q
 
 	// 查询数据
 	let query_sql = match (has_event_filter, has_market_filter) {
-		(true, true) => format!("SELECT * FROM orders WHERE user_id = $1 AND status = ANY($2) AND event_id = $3 AND market_id = $4 ORDER BY created_at DESC LIMIT {} OFFSET {}", page_size, offset),
-		(true, false) => format!("SELECT * FROM orders WHERE user_id = $1 AND status = ANY($2) AND event_id = $3 ORDER BY created_at DESC LIMIT {} OFFSET {}", page_size, offset),
-		(false, true) => format!("SELECT * FROM orders WHERE user_id = $1 AND status = ANY($2) AND market_id = $3 ORDER BY created_at DESC LIMIT {} OFFSET {}", page_size, offset),
-		(false, false) => format!("SELECT * FROM orders WHERE user_id = $1 AND status = ANY($2) ORDER BY created_at DESC LIMIT {} OFFSET {}", page_size, offset),
+		(true, true) => {
+			format!(
+				"SELECT * FROM orders WHERE user_id = $1 AND status = ANY($2) AND event_id = $3 AND market_id = $4 AND order_type = $5 ORDER BY created_at DESC LIMIT {} OFFSET {}",
+				page_size, offset
+			)
+		}
+		(true, false) => format!("SELECT * FROM orders WHERE user_id = $1 AND status = ANY($2) AND event_id = $3 AND order_type = $4 ORDER BY created_at DESC LIMIT {} OFFSET {}", page_size, offset),
+		(false, true) => format!("SELECT * FROM orders WHERE user_id = $1 AND status = ANY($2) AND market_id = $3 AND order_type = $4 ORDER BY created_at DESC LIMIT {} OFFSET {}", page_size, offset),
+		(false, false) => format!("SELECT * FROM orders WHERE user_id = $1 AND status = ANY($2) AND order_type = $3 ORDER BY created_at DESC LIMIT {} OFFSET {}", page_size, offset),
 	};
 
 	let orders: Vec<Orders> = match (has_event_filter, has_market_filter) {
@@ -1245,6 +1253,7 @@ pub async fn handle_open_orders(Extension(client_info): Extension<ClientInfo>, Q
 				.bind(&statuses)
 				.bind(params.event_id.expect("event_id checked"))
 				.bind(params.market_id.expect("market_id checked"))
+				.bind(OrderType::Limit)
 				.fetch_all(&read_pool)
 				.await
 				.map_err(|e| {
@@ -1253,19 +1262,19 @@ pub async fn handle_open_orders(Extension(client_info): Extension<ClientInfo>, Q
 				})?
 		}
 		(true, false) => {
-			sqlx::query_as(&query_sql).bind(user_id).bind(&statuses).bind(params.event_id.expect("event_id checked")).fetch_all(&read_pool).await.map_err(|e| {
+			sqlx::query_as(&query_sql).bind(user_id).bind(&statuses).bind(params.event_id.expect("event_id checked")).bind(OrderType::Limit).fetch_all(&read_pool).await.map_err(|e| {
 				tracing::error!("request_id={}, privy_id={} - Failed to query open orders: {}", client_info.request_id, privy_id, e);
 				InternalError
 			})?
 		}
 		(false, true) => {
-			sqlx::query_as(&query_sql).bind(user_id).bind(&statuses).bind(params.market_id.expect("market_id checked")).fetch_all(&read_pool).await.map_err(|e| {
+			sqlx::query_as(&query_sql).bind(user_id).bind(&statuses).bind(params.market_id.expect("market_id checked")).bind(OrderType::Limit).fetch_all(&read_pool).await.map_err(|e| {
 				tracing::error!("request_id={}, privy_id={} - Failed to query open orders: {}", client_info.request_id, privy_id, e);
 				InternalError
 			})?
 		}
 		(false, false) => {
-			sqlx::query_as(&query_sql).bind(user_id).bind(&statuses).fetch_all(&read_pool).await.map_err(|e| {
+			sqlx::query_as(&query_sql).bind(user_id).bind(&statuses).bind(OrderType::Limit).fetch_all(&read_pool).await.map_err(|e| {
 				tracing::error!("request_id={}, privy_id={} - Failed to query open orders: {}", client_info.request_id, privy_id, e);
 				InternalError
 			})?
@@ -1562,6 +1571,26 @@ pub async fn handle_order_history(Extension(client_info): Extension<ClientInfo>,
 		.filter_map(|r| {
 			let event = events_map.get(&r.event_id)?;
 			let market = event.markets.get(&r.market_id.to_string())?;
+
+			// 根据订单类型选择对应的字段
+			let (price, quantity, volume, filled_quantity, cancelled_quantity) = match r.order_type {
+				common::engine_types::OrderType::Market => {
+					// 市价单：使用 market_* 字段
+					let market_price = if r.market_filled_quantity > rust_decimal::Decimal::ZERO {
+						// 计算平均价格：market_volume / market_filled_quantity
+						r.market_filled_volume.checked_div(r.market_filled_quantity).unwrap_or(r.market_price).trunc_with_scale(4).normalize()
+					} else {
+						// 如果没有成交，使用提交时的市价单价格
+						r.market_price.normalize()
+					};
+					(market_price, r.market_quantity.normalize(), r.market_volume.normalize(), r.market_filled_quantity.normalize(), r.market_cancelled_quantity.normalize())
+				}
+				common::engine_types::OrderType::Limit => {
+					// 限价单：使用普通字段
+					(r.price.normalize(), r.quantity.normalize(), r.volume.normalize(), r.filled_quantity.normalize(), r.cancelled_quantity.normalize())
+				}
+			};
+
 			Some(SingleOrderHistoryResponse {
 				order_id: r.id.to_string(),
 				event_title: event.title.clone(),
@@ -1573,11 +1602,11 @@ pub async fn handle_order_history(Extension(client_info): Extension<ClientInfo>,
 				outcome: r.outcome.clone(),
 				order_side: r.order_side,
 				order_type: r.order_type,
-				price: r.price.normalize(),
-				quantity: r.quantity.normalize(),
-				volume: r.volume.normalize(),
-				filled_quantity: r.filled_quantity.normalize(),
-				cancelled_quantity: r.cancelled_quantity.normalize(),
+				price,
+				quantity,
+				volume,
+				filled_quantity,
+				cancelled_quantity,
 				status: r.status,
 				created_at: r.created_at.timestamp(),
 				updated_at: r.updated_at.timestamp(),

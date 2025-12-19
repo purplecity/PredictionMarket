@@ -81,57 +81,66 @@ query_scalar!	只查一个值（单列）	直接是那个值的类型	i64, Strin
 /// markets_results: Vec<(market_identifier, win_outcome_token_id, win_outcome_name)>
 pub async fn update_event_closed(event_identifier: &str, markets_results: &[(String, String, String)]) -> anyhow::Result<i64> {
 	let pool = get_db_pool()?;
-	let now = Some(chrono::Utc::now());
+	let now = chrono::Utc::now();
 
-	// 1. 根据 event_identifier 查询获取 markets
-	let mut markets_json: serde_json::Value = sqlx::query_scalar(
-		r#"
-		SELECT markets
-		FROM events
-		WHERE event_identifier = $1
-		"#,
-	)
-	.bind(event_identifier)
-	.fetch_one(&pool)
-	.await?;
+	// 1. 先查询获取 event_id 和当前 markets，用于找到每个 market 的 key
+	let result: Option<(i64, serde_json::Value)> = sqlx::query_as("SELECT id, markets FROM events WHERE event_identifier = $1").bind(event_identifier).fetch_optional(&pool).await?;
 
-	// 2. 更新 markets JSON 字段中的 win_outcome_token_id 和 win_outcome_name
-	if !markets_results.is_empty() {
-		// 解析为 HashMap<String, EventMarket>
-		let mut markets_map: std::collections::HashMap<String, EventMarket> = serde_json::from_value(markets_json)?;
+	let (event_id, markets_json) = result.ok_or_else(|| anyhow::anyhow!("Event not found: {}", event_identifier))?;
 
-		// 更新每个匹配的选项
-		for (market_identifier, win_outcome_token_id, win_outcome_name) in markets_results {
-			// 查找匹配的选项
-			for (_, market) in markets_map.iter_mut() {
-				if &market.market_identifier == market_identifier {
-					market.win_outcome_token_id = win_outcome_token_id.clone();
-					market.win_outcome_name = win_outcome_name.clone();
-					break;
-				}
-			}
+	// 解析 markets 以找到 market_identifier 对应的 key（market_id字符串）
+	let markets_map: std::collections::HashMap<String, EventMarket> = serde_json::from_value(markets_json)?;
+
+	// 2. 开始事务，使用 JSONB 操作符逐个更新 market
+	let mut tx = pool.begin().await?;
+
+	for (market_identifier, win_outcome_token_id, win_outcome_name) in markets_results {
+		// 找到对应的 market_id（即 HashMap 的 key）
+		let market_key = markets_map.iter().find(|(_, market)| &market.market_identifier == market_identifier).map(|(key, _)| key);
+
+		if let Some(key) = market_key {
+			// 使用 JSONB 操作符更新单个 market 的字段
+			sqlx::query(
+				r#"
+				UPDATE events
+				SET markets = jsonb_set(
+					jsonb_set(
+						markets,
+						ARRAY[$1, 'win_outcome_token_id']::text[],
+						to_jsonb($2::text)
+					),
+					ARRAY[$1, 'win_outcome_name']::text[],
+					to_jsonb($3::text)
+				)
+				WHERE event_identifier = $4
+				"#,
+			)
+			.bind(key)
+			.bind(win_outcome_token_id)
+			.bind(win_outcome_name)
+			.bind(event_identifier)
+			.execute(&mut *tx)
+			.await?;
 		}
-
-		// 将更新后的 markets 转换为 JSON
-		markets_json = serde_json::to_value(&markets_map)?;
 	}
 
-	// 3. 一条 UPDATE 语句同时更新 closed、closed_at 和 markets event_id
-	let id: i64 = sqlx::query_scalar(
+	// 3. 更新 event 的 closed 和 closed_at
+	sqlx::query(
 		r#"
 		UPDATE events
-		SET closed = true, closed_at = $1, markets = $2
-		WHERE event_identifier = $3
-		RETURNING id
+		SET closed = true, closed_at = $1
+		WHERE event_identifier = $2
 		"#,
 	)
 	.bind(now)
-	.bind(&markets_json)
 	.bind(event_identifier)
-	.fetch_one(&pool)
+	.execute(&mut *tx)
 	.await?;
 
-	Ok(id)
+	// 4. 提交事务
+	tx.commit().await?;
+
+	Ok(event_id)
 }
 
 /// 检查市场是否所有订单都已处理完（status 不为 New 和 PartiallyFilled 则认为已处理）

@@ -1,5 +1,5 @@
 use {
-	common::engine_types::{Order, PredictionSymbol},
+	common::engine_types::{PredictionSymbol, SubmitOrderMessage},
 	serde::{Deserialize, Serialize},
 };
 
@@ -7,7 +7,7 @@ use {
 #[derive(Debug)]
 pub enum OrderBookControl {
 	/// 提交订单进行撮合
-	SubmitOrder(Order),
+	SubmitOrder(SubmitOrderMessage),
 	/// 取消订单
 	CancelOrder(String),
 }

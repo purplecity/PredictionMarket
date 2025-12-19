@@ -10,32 +10,33 @@
 use {
 	crate::reporter::ScenarioResult,
 	colored::Colorize,
-	common::engine_types::{Order, OrderSide, OrderType, PredictionSymbol},
+	common::engine_types::{OrderSide, OrderType, PredictionSymbol, SubmitOrderMessage},
 	hdrhistogram::Histogram,
 	indicatif::{ProgressBar, ProgressStyle},
-	match_engine::engine::MatchEngine,
+	match_engine::{
+		engine::MatchEngine,
+		helper::{price_decimal, quantity_decimal},
+	},
 	std::time::{Duration, Instant},
 	tokio::sync::broadcast,
 };
 
-/// 生成测试订单
-fn generate_order(order_num: u64, user_id: i64, symbol: &PredictionSymbol, side: OrderSide, price: i32, quantity: u64) -> Order {
-	Order {
+/// 生成测试订单消息
+fn generate_order(order_num: u64, user_id: i64, symbol: &PredictionSymbol, side: OrderSide, price: i32, quantity: u64) -> SubmitOrderMessage {
+	// volume = price_decimal * quantity_decimal (原生USDC值)
+	let volume = price_decimal(price) * quantity_decimal(quantity);
+
+	SubmitOrderMessage {
 		order_id: format!("bench_{}", order_num),
 		symbol: symbol.clone(),
 		side,
 		order_type: OrderType::Limit,
 		price,
-		opposite_result_price: 10000 - price,
+		volume,
 		quantity,
-		remaining_quantity: quantity,
-		filled_quantity: 0,
-		status: common::engine_types::OrderStatus::New,
 		user_id,
 		privy_id: format!("privy_{}", user_id),
 		outcome_name: "Yes".to_string(),
-		order_num,
-		timestamp: 0,
 	}
 }
 
@@ -75,7 +76,7 @@ pub async fn run_pure_insert(order_count: u64, warmup_count: u64) -> anyhow::Res
 	let token_1_id = "token_1".to_string();
 
 	let (exit_tx, exit_rx) = broadcast::channel(1);
-	let (mut engine, _sender) = MatchEngine::new(event_id, market_id, (token_0_id.clone(), token_1_id.clone()), 1000000, exit_rx);
+	let (mut engine, _sender) = MatchEngine::new(event_id, market_id, (token_0_id.clone(), token_1_id.clone()), 1000000, exit_rx, tokio::sync::oneshot::channel().1);
 
 	let symbol = PredictionSymbol::new(event_id, market_id, &token_0_id);
 
@@ -85,8 +86,8 @@ pub async fn run_pure_insert(order_count: u64, warmup_count: u64) -> anyhow::Res
 		let side = if i % 2 == 0 { OrderSide::Buy } else { OrderSide::Sell };
 		// 买单价格 1000-2000，卖单价格 8000-9000，不会撮合
 		let price = if side == OrderSide::Buy { 1000 + (i % 1000) as i32 } else { 8000 + (i % 1000) as i32 };
-		let mut order = generate_order(i, (i % 1000 + 1) as i64, &symbol, side, price, 100);
-		let _ = engine.submit_order(&mut order);
+		let order_msg = generate_order(i, (i % 1000 + 1) as i64, &symbol, side, price, 100);
+		let _ = engine.submit_order(&order_msg, i);
 	}
 
 	// 正式测试
@@ -99,10 +100,10 @@ pub async fn run_pure_insert(order_count: u64, warmup_count: u64) -> anyhow::Res
 		let side = if i % 2 == 0 { OrderSide::Buy } else { OrderSide::Sell };
 		// 买单价格 1000-2000，卖单价格 8000-9000
 		let price = if side == OrderSide::Buy { 1000 + (i % 1000) as i32 } else { 8000 + (i % 1000) as i32 };
-		let mut order = generate_order(order_num, (i % 1000 + 1) as i64, &symbol, side, price, 100);
+		let order_msg = generate_order(order_num, (i % 1000 + 1) as i64, &symbol, side, price, 100);
 
 		let op_start = Instant::now();
-		let _ = engine.submit_order(&mut order);
+		let _ = engine.submit_order(&order_msg, order_num);
 		let op_elapsed = op_start.elapsed();
 
 		let _ = histogram.record(op_elapsed.as_nanos() as u64);
@@ -127,7 +128,7 @@ pub async fn run_full_match(order_count: u64, warmup_count: u64) -> anyhow::Resu
 	let token_1_id = "token_1".to_string();
 
 	let (exit_tx, exit_rx) = broadcast::channel(1);
-	let (mut engine, _sender) = MatchEngine::new(event_id, market_id, (token_0_id.clone(), token_1_id.clone()), 1000000, exit_rx);
+	let (mut engine, _sender) = MatchEngine::new(event_id, market_id, (token_0_id.clone(), token_1_id.clone()), 1000000, exit_rx, tokio::sync::oneshot::channel().1);
 
 	let symbol = PredictionSymbol::new(event_id, market_id, &token_0_id);
 
@@ -135,8 +136,8 @@ pub async fn run_full_match(order_count: u64, warmup_count: u64) -> anyhow::Resu
 	println!("{}", format!("  预热中 ({} 卖单作为 maker)...", warmup_count).dimmed());
 	for i in 0..warmup_count {
 		// 卖单价格 5000，大量挂单等待被吃
-		let mut order = generate_order(i, (i % 1000 + 1) as i64, &symbol, OrderSide::Sell, 5000, 100);
-		let _ = engine.submit_order(&mut order);
+		let order_msg = generate_order(i, (i % 1000 + 1) as i64, &symbol, OrderSide::Sell, 5000, 100);
+		let _ = engine.submit_order(&order_msg, i);
 	}
 
 	// 正式测试：用买单去吃
@@ -148,10 +149,10 @@ pub async fn run_full_match(order_count: u64, warmup_count: u64) -> anyhow::Resu
 		let order_num = warmup_count + i;
 		// 买单价格 6000，高于卖单价格 5000，会完全成交
 		// 使用不同的 user_id 避免自成交
-		let mut order = generate_order(order_num, (i % 1000 + 1001) as i64, &symbol, OrderSide::Buy, 6000, 100);
+		let order_msg = generate_order(order_num, (i % 1000 + 1001) as i64, &symbol, OrderSide::Buy, 6000, 100);
 
 		let op_start = Instant::now();
-		let _ = engine.submit_order(&mut order);
+		let _ = engine.submit_order(&order_msg, order_num);
 		let op_elapsed = op_start.elapsed();
 
 		let _ = histogram.record(op_elapsed.as_nanos() as u64);
@@ -176,7 +177,7 @@ pub async fn run_partial_match(order_count: u64, warmup_count: u64) -> anyhow::R
 	let token_1_id = "token_1".to_string();
 
 	let (exit_tx, exit_rx) = broadcast::channel(1);
-	let (mut engine, _sender) = MatchEngine::new(event_id, market_id, (token_0_id.clone(), token_1_id.clone()), 1000000, exit_rx);
+	let (mut engine, _sender) = MatchEngine::new(event_id, market_id, (token_0_id.clone(), token_1_id.clone()), 1000000, exit_rx, tokio::sync::oneshot::channel().1);
 
 	let symbol = PredictionSymbol::new(event_id, market_id, &token_0_id);
 
@@ -184,8 +185,8 @@ pub async fn run_partial_match(order_count: u64, warmup_count: u64) -> anyhow::R
 	println!("{}", format!("  预热中 ({} 订单)...", warmup_count).dimmed());
 	for i in 0..warmup_count {
 		// 卖单价格 5000
-		let mut order = generate_order(i, (i % 1000 + 1) as i64, &symbol, OrderSide::Sell, 5000, 100);
-		let _ = engine.submit_order(&mut order);
+		let order_msg = generate_order(i, (i % 1000 + 1) as i64, &symbol, OrderSide::Sell, 5000, 100);
+		let _ = engine.submit_order(&order_msg, i);
 	}
 
 	// 正式测试：交替发送可撮合和不可撮合的订单
@@ -202,10 +203,10 @@ pub async fn run_partial_match(order_count: u64, warmup_count: u64) -> anyhow::R
 			// 不能撮合的买单（价格太低）
 			(OrderSide::Buy, 3000)
 		};
-		let mut order = generate_order(order_num, (i % 1000 + 1001) as i64, &symbol, side, price, 100);
+		let order_msg = generate_order(order_num, (i % 1000 + 1001) as i64, &symbol, side, price, 100);
 
 		let op_start = Instant::now();
-		let _ = engine.submit_order(&mut order);
+		let _ = engine.submit_order(&order_msg, order_num);
 		let op_elapsed = op_start.elapsed();
 
 		let _ = histogram.record(op_elapsed.as_nanos() as u64);
@@ -230,7 +231,7 @@ pub async fn run_cross_match(order_count: u64, warmup_count: u64) -> anyhow::Res
 	let token_1_id = "token_1".to_string();
 
 	let (exit_tx, exit_rx) = broadcast::channel(1);
-	let (mut engine, _sender) = MatchEngine::new(event_id, market_id, (token_0_id.clone(), token_1_id.clone()), 1000000, exit_rx);
+	let (mut engine, _sender) = MatchEngine::new(event_id, market_id, (token_0_id.clone(), token_1_id.clone()), 1000000, exit_rx, tokio::sync::oneshot::channel().1);
 
 	let symbol_0 = PredictionSymbol::new(event_id, market_id, &token_0_id);
 	let symbol_1 = PredictionSymbol::new(event_id, market_id, &token_1_id);
@@ -239,12 +240,12 @@ pub async fn run_cross_match(order_count: u64, warmup_count: u64) -> anyhow::Res
 	println!("{}", format!("  预热中 ({} 订单)...", warmup_count).dimmed());
 	for i in 0..warmup_count / 2 {
 		// token_0 卖单，价格 5000
-		let mut order = generate_order(i, (i % 1000 + 1) as i64, &symbol_0, OrderSide::Sell, 5000, 100);
-		let _ = engine.submit_order(&mut order);
+		let order_msg = generate_order(i, (i % 1000 + 1) as i64, &symbol_0, OrderSide::Sell, 5000, 100);
+		let _ = engine.submit_order(&order_msg, i);
 
 		// token_1 买单，价格 5000 (opposite_result_price = 5000，即对应 token_0 价格 5000)
-		let mut order = generate_order(warmup_count / 2 + i, (i % 1000 + 1) as i64, &symbol_1, OrderSide::Buy, 5000, 100);
-		let _ = engine.submit_order(&mut order);
+		let order_msg = generate_order(warmup_count / 2 + i, (i % 1000 + 1) as i64, &symbol_1, OrderSide::Buy, 5000, 100);
+		let _ = engine.submit_order(&order_msg, warmup_count / 2 + i);
 	}
 
 	// 正式测试：用 token_0 买单去吃（会触发交叉撮合）
@@ -255,10 +256,10 @@ pub async fn run_cross_match(order_count: u64, warmup_count: u64) -> anyhow::Res
 	for i in 0..order_count {
 		let order_num = warmup_count + i;
 		// token_0 买单，价格 6000
-		let mut order = generate_order(order_num, (i % 1000 + 1001) as i64, &symbol_0, OrderSide::Buy, 6000, 100);
+		let order_msg = generate_order(order_num, (i % 1000 + 1001) as i64, &symbol_0, OrderSide::Buy, 6000, 100);
 
 		let op_start = Instant::now();
-		let _ = engine.submit_order(&mut order);
+		let _ = engine.submit_order(&order_msg, order_num);
 		let op_elapsed = op_start.elapsed();
 
 		let _ = histogram.record(op_elapsed.as_nanos() as u64);
@@ -284,7 +285,7 @@ pub async fn run_deep_orderbook(duration_secs: u64) -> anyhow::Result<ScenarioRe
 
 	let (exit_tx, exit_rx) = broadcast::channel(1);
 	// 容量设置：根据系统内存调整，10 分钟测试约需 500 万订单容量
-	let (mut engine, _sender) = MatchEngine::new(event_id, market_id, (token_0_id.clone(), token_1_id.clone()), 5_000_000, exit_rx);
+	let (mut engine, _sender) = MatchEngine::new(event_id, market_id, (token_0_id.clone(), token_1_id.clone()), 5_000_000, exit_rx, tokio::sync::oneshot::channel().1);
 
 	let symbol = PredictionSymbol::new(event_id, market_id, &token_0_id);
 
@@ -301,8 +302,8 @@ pub async fn run_deep_orderbook(duration_secs: u64) -> anyhow::Result<ScenarioRe
 		let price = (100 + level) as i32; // 价格从 100 到 10099
 		for _j in 0..orders_per_level {
 			// 每个订单使用唯一的 user_id
-			let mut order = generate_order(order_num, order_num as i64 + 1, &symbol, OrderSide::Sell, price, 1000);
-			let _ = engine.submit_order(&mut order);
+			let order_msg = generate_order(order_num, order_num as i64 + 1, &symbol, OrderSide::Sell, price, 1000);
+			let _ = engine.submit_order(&order_msg, order_num);
 			order_num += 1;
 			depth_pb.inc(1);
 		}
@@ -328,10 +329,10 @@ pub async fn run_deep_orderbook(duration_secs: u64) -> anyhow::Result<ScenarioRe
 		// 交替买卖，价格重叠确保能撮合
 		let side = if total_orders.is_multiple_of(2) { OrderSide::Buy } else { OrderSide::Sell };
 		let price = if side == OrderSide::Buy { 5500 + (total_orders % 500) as i32 } else { 4500 + (total_orders % 500) as i32 };
-		let mut order = generate_order(order_num + total_orders, user_id as i64, &symbol, side, price, 1000);
+		let order_msg = generate_order(order_num + total_orders, user_id as i64, &symbol, side, price, 1000);
 
 		let op_start = Instant::now();
-		let _ = engine.submit_order(&mut order);
+		let _ = engine.submit_order(&order_msg, order_num);
 		let op_elapsed = op_start.elapsed();
 
 		let _ = histogram.record(op_elapsed.as_nanos() as u64);
@@ -419,7 +420,7 @@ pub async fn run_multi_market(duration_secs: u64, warmup_count: u64, market_coun
 
 			let (exit_tx, exit_rx) = broadcast::channel(1);
 			// 容量设置：根据系统内存调整，每个市场 500 万订单容量
-			let (mut engine, _sender) = MatchEngine::new(event_id, market_id, (token_0_id.clone(), token_1_id.clone()), 5_000_000, exit_rx);
+			let (mut engine, _sender) = MatchEngine::new(event_id, market_id, (token_0_id.clone(), token_1_id.clone()), 5_000_000, exit_rx, tokio::sync::oneshot::channel().1);
 
 			let symbol = PredictionSymbol::new(event_id, market_id, &token_0_id);
 
@@ -428,8 +429,8 @@ pub async fn run_multi_market(duration_secs: u64, warmup_count: u64, market_coun
 				let side = if i % 2 == 0 { OrderSide::Buy } else { OrderSide::Sell };
 				// 买单 4000-5000，卖单 5000-6000，中间价格可以撮合
 				let price = if side == OrderSide::Buy { 4000 + (i % 1000) as i32 } else { 5000 + (i % 1000) as i32 };
-				let mut order = generate_order(i, i as i64 + 1, &symbol, side, price, 1000);
-				let _ = engine.submit_order(&mut order);
+				let order_msg = generate_order(i, i as i64 + 1, &symbol, side, price, 1000);
+				let _ = engine.submit_order(&order_msg, i);
 			}
 
 			// 正式测试：持续运行指定时间，混合买卖订单
@@ -445,10 +446,10 @@ pub async fn run_multi_market(duration_secs: u64, warmup_count: u64, market_coun
 				// 交替买卖，价格重叠确保能撮合
 				let side = if order_count.is_multiple_of(2) { OrderSide::Buy } else { OrderSide::Sell };
 				let price = if side == OrderSide::Buy { 5500 + (order_count % 500) as i32 } else { 4500 + (order_count % 500) as i32 };
-				let mut order = generate_order(order_num, user_id as i64, &symbol, side, price, 1000);
+				let order_msg = generate_order(order_num, user_id as i64, &symbol, side, price, 1000);
 
 				let op_start = Instant::now();
-				let _ = engine.submit_order(&mut order);
+				let _ = engine.submit_order(&order_msg, order_num);
 				let op_elapsed = op_start.elapsed();
 
 				let _ = histogram.record(op_elapsed.as_nanos() as u64);

@@ -140,6 +140,8 @@ impl OutputPublisher {
 					OrderChangeEvent::OrderCancelled { symbol, .. } => symbol.event_id.to_string(),
 					OrderChangeEvent::EventAdded(event) => event.event_id.to_string(),
 					OrderChangeEvent::EventRemoved(event_id) => event_id.to_string(),
+					OrderChangeEvent::MarketAdded { event_id, .. } => event_id.to_string(),
+					OrderChangeEvent::MarketRemoved { event_id, .. } => event_id.to_string(),
 					OrderChangeEvent::MarketUpdateId { event_id, .. } => event_id.to_string(),
 				};
 				(STORE_STREAM.to_string(), STORE_MSG_KEY.to_string(), hash_key, serde_json::to_string(event)?)

@@ -1,9 +1,10 @@
 use {
 	crate::{
 		consts::SYMBOL_SEPARATOR,
-		event_types::{EngineMQEventCreate, MQEventClose},
+		event_types::{EngineMQEventCreate, EngineMQEventMarket, MQEventClose},
 	},
 	core::fmt,
+	rust_decimal::Decimal,
 	serde::{Deserialize, Serialize},
 	std::{fmt::Display, str::FromStr},
 };
@@ -125,7 +126,7 @@ impl FromStr for PredictionSymbol {
 	}
 }
 
-/// 撮合内存订单存储
+/// 撮合内存订单存储（限价单专用）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Order {
 	pub order_id: String, //订单id
@@ -279,8 +280,9 @@ pub struct SubmitOrderMessage {
 	pub symbol: PredictionSymbol,
 	pub side: OrderSide,
 	pub order_type: OrderType,
-	pub quantity: u64, //乘以了100的 原始数字应该是最多保留2位小数 下单时候校验
-	pub price: i32,    //乘以了10000的 原始数字应该是最多保留4位小数 下单时候校验
+	pub quantity: u64,   //乘以了100的 原始数字应该是最多保留2位小数 下单时候校验
+	pub price: i32,      //乘以了10000的 原始数字应该是最多保留4位小数 下单时候校验
+	pub volume: Decimal, //USDC金额，不乘以精度，就是实际的美金值，比如3美金就是3
 	pub user_id: i64,
 	pub privy_id: String,     // 用于websocket推送
 	pub outcome_name: String, // 用于websocket推送
@@ -300,8 +302,24 @@ pub struct CancelOrderMessage {
 pub enum EventInputMessage {
 	AddOneEvent(EngineMQEventCreate),
 	RemoveOneEvent(MQEventClose),            //到期remove
+	AddOneMarket(AddOneMarketMessage),       //在已有Event下添加单个Market
+	RemoveOneMarket(RemoveOneMarketMessage), //移除Event下的单个Market
 	StopAllEvents(StopAllEventsMessage),     //维护停机 所有市场不再接单
 	ResumeAllEvents(ResumeAllEventsMessage), //维护恢复 中断后的市场可以重新接单
+}
+
+/// 在已有Event下添加单个Market
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AddOneMarketMessage {
+	pub event_id: i64,
+	pub market: EngineMQEventMarket,
+}
+
+/// 移除Event下的单个Market
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RemoveOneMarketMessage {
+	pub event_id: i64,
+	pub market_id: i16,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

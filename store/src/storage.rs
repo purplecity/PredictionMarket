@@ -135,6 +135,52 @@ impl OrderStorage {
 					info!("Event {} removed", event_id);
 				}
 			}
+			OrderChangeEvent::MarketAdded { event_id, market } => {
+				info!("Processing MarketAdded event: event_id={}, market_id={}", event_id, market.market_id);
+				// 在已有event下添加新market
+				if let Some(event) = data.events.get_mut(&event_id) {
+					let market_id_str = market.market_id.to_string();
+					event.markets.insert(market_id_str, market);
+				} else {
+					error!("Event {} not found when adding market", event_id);
+				}
+			}
+			OrderChangeEvent::MarketRemoved { event_id, market_id } => {
+				info!("Processing MarketRemoved event: event_id={}, market_id={}", event_id, market_id);
+				// 移除单个market并清理该market的所有订单
+				let market_prefix = format!("{}{}{}{}", event_id, SYMBOL_SEPARATOR, market_id, SYMBOL_SEPARATOR);
+
+				// 收集需要删除的 symbol key
+				let mut symbols_to_remove = Vec::new();
+				for symbol_key in data.orders.keys() {
+					if symbol_key.starts_with(&market_prefix) {
+						symbols_to_remove.push(symbol_key.clone());
+					}
+				}
+
+				// 删除所有属于该market的订单
+				let mut total_orders_removed = 0;
+				for symbol_key in symbols_to_remove {
+					if let Some(symbol_orders) = data.orders.remove(&symbol_key) {
+						total_orders_removed += symbol_orders.len();
+					}
+				}
+
+				// 移除该 market 的 update_id
+				data.market_update_ids.remove(&(event_id, market_id));
+
+				// 从event中移除market信息
+				if let Some(event) = data.events.get_mut(&event_id) {
+					let market_id_str = market_id.to_string();
+					event.markets.remove(&market_id_str);
+				}
+
+				if total_orders_removed > 0 {
+					info!("Market {} in event {} removed: {} orders cleaned up", market_id, event_id, total_orders_removed);
+				} else {
+					info!("Market {} in event {} removed", market_id, event_id);
+				}
+			}
 			OrderChangeEvent::MarketUpdateId { event_id, market_id, update_id } => {
 				// 更新该 market 的最新 update_id
 				data.market_update_ids.insert((event_id, market_id), update_id);

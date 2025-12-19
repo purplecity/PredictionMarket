@@ -8,12 +8,12 @@ use {
 	},
 	chrono::Utc,
 	common::{
-		engine_types::{Order, OrderSide, OrderStatus, OrderType, PredictionSymbol},
+		engine_types::{Order, OrderSide, OrderStatus, OrderType, PredictionSymbol, SubmitOrderMessage},
 		processor_types::{OrderCancelled, OrderRejected, OrderSubmitted, OrderTraded, ProcessorMessage, Trade},
 		store_types::OrderChangeEvent,
 		websocket_types::{PriceLevelInfo, SingleTokenPriceInfo},
 	},
-	rust_decimal::Decimal,
+	rust_decimal::{Decimal, prelude::ToPrimitive},
 	rustc_hash::FxHashMap,
 	std::{collections::HashMap, sync::Arc},
 	tokio::{
@@ -72,6 +72,30 @@ pub struct Manager {
 	pub stop: bool, // 用于维护撮合引擎是否暂停
 }
 
+/// 匹配订单的结果（get_cross_matching_orders内部使用）
+/// 限价买 有filled_quantity/remaining_quantiy/filled_volume/remaining_volume
+/// 限价卖 有filled_quantity/remaining_quantiy/filled_volume,remaining_volume为0
+/// 市价买 有filled_quantity/filled_volume/remaining_volume,remaining_quantity为0
+/// 市价卖 有filled_quantity/remaining_quantity/filled_volume,remaining_volume为0
+pub struct CrossMatchingResult {
+	pub matched_orders: Vec<(Arc<Order>, i32, u64)>, // (订单, 匹配价格, 成交数量)
+	pub filled_quantity: u64,                        //本次撮合实际成交的数量
+	pub remaining_quantity: u64,                     //市价买单这个为0
+	pub filled_volume: Decimal,                      //本次撮合实际成交的usdc金额
+	pub remaining_volume: Decimal, //只有市价买单才有这个字段响应,如果市价买单吃不完那么会取消 或者由于某一个价格档位 单个数量tick的usdc交易额超过了market volume,那么也会剩一点点的也会被取消
+	pub has_self_trade: bool,      //是否遇到自成交,是的话剩下的会直接取消 不管是限价单还是市价单
+}
+
+/// 匹配订单的最终结果（submit_order使用）
+pub struct MatchingResult {
+	pub trades: Vec<Trade>,        // 成交记录
+	pub filled_quantity: u64,      //本次撮合实际成交的数量
+	pub remaining_quantity: u64,   //市价买单这个为0
+	pub filled_volume: Decimal,    //本次撮合实际成交的usdc金额
+	pub remaining_volume: Decimal, //只有市价买单才有这个字段响应
+	pub has_self_trade: bool,      //是否遇到自成交
+}
+
 impl Default for Manager {
 	fn default() -> Self {
 		Self::new()
@@ -87,8 +111,9 @@ impl Manager {
 pub struct EventManager {
 	pub event_id: i64,
 	pub order_senders: HashMap<String, mpsc::Sender<OrderBookControl>>, // key是event_id和market_id的组合，格式: event_id分隔符market_id
-	pub exit_signal: broadcast::Sender<()>,
-	pub end_timestamp: Option<chrono::DateTime<Utc>>, // 市场结束时间戳
+	pub exit_signal: broadcast::Sender<()>,                             // 全局退出信号（用于整个event关闭）
+	pub market_exit_signals: HashMap<String, tokio::sync::oneshot::Sender<()>>, // 每个market的独立退出信号（oneshot）
+	pub end_timestamp: Option<chrono::DateTime<Utc>>,                   // 市场结束时间戳
 }
 
 pub struct MatchEngine {
@@ -101,7 +126,8 @@ pub struct MatchEngine {
 	pub token_0_orders: HashMap<String, Arc<Order>>, //取消订单的时候需要用到，使用Arc共享订单数据
 	pub token_1_orders: HashMap<String, Arc<Order>>, //取消订单的时候需要用到，使用Arc共享订单数据
 	pub order_receiver: mpsc::Receiver<OrderBookControl>,
-	pub exit_receiver: broadcast::Receiver<()>,
+	pub exit_receiver: broadcast::Receiver<()>,                           // 全局退出信号（event关闭）
+	pub market_exit_receiver: Option<tokio::sync::oneshot::Receiver<()>>, // market级别的退出信号（oneshot，在run时取出）
 	pub order_num: u64,
 	pub update_id: u64,
 	// 缓存价格档位变化 price -> PriceLevelChange (分开bid和ask)
@@ -120,7 +146,14 @@ pub struct MatchEngine {
 impl MatchEngine {
 	//新创建一个撮合引擎 并返回order_sender
 	// 现在一个MatchEngine处理一个market（event_id + market_id），维护token_0和token_1两个OrderBook
-	pub fn new(event_id: i64, market_id: i16, token_ids: (String, String), max_order_count: u64, exit_receiver: broadcast::Receiver<()>) -> (Self, mpsc::Sender<OrderBookControl>) {
+	pub fn new(
+		event_id: i64,
+		market_id: i16,
+		token_ids: (String, String),
+		max_order_count: u64,
+		exit_receiver: broadcast::Receiver<()>,
+		market_exit_receiver: tokio::sync::oneshot::Receiver<()>,
+	) -> (Self, mpsc::Sender<OrderBookControl>) {
 		let (order_sender, order_receiver) = mpsc::channel(max_order_count as usize);
 		let token_0_symbol = PredictionSymbol::new(event_id, market_id, &token_ids.0);
 		let token_1_symbol = PredictionSymbol::new(event_id, market_id, &token_ids.1);
@@ -135,6 +168,7 @@ impl MatchEngine {
 			token_1_orders: HashMap::new(),
 			order_receiver,
 			exit_receiver,
+			market_exit_receiver: Some(market_exit_receiver),
 			order_num: 0,
 			update_id: 0,
 			token_0_bid_changes: FxHashMap::default(),
@@ -158,6 +192,7 @@ impl MatchEngine {
 		symbol_orders_map: HashMap<String, Vec<Order>>,
 		max_order_count: u64,
 		exit_receiver: broadcast::Receiver<()>,
+		market_exit_receiver: tokio::sync::oneshot::Receiver<()>,
 	) -> anyhow::Result<(Self, mpsc::Sender<OrderBookControl>)> {
 		let (order_sender, order_receiver) = mpsc::channel(max_order_count as usize);
 
@@ -201,6 +236,7 @@ impl MatchEngine {
 			token_1_orders: token_1_orders_map,
 			order_receiver,
 			exit_receiver,
+			market_exit_receiver: Some(market_exit_receiver),
 			order_num: max_order_num + 1,
 			update_id: 0,
 			token_0_bid_changes: FxHashMap::default(),
@@ -392,79 +428,251 @@ impl MatchEngine {
 	// 卖单taker：遍历本方orderbook的bids（已包含相同结果买单 + 相反结果卖单的交叉插入）
 	//
 	// 由于交叉插入时保持了order_num顺序，同价格档位内自然按时间优先
-	// 返回: (匹配的订单列表(Arc<Order>, 匹配价格), 是否遇到自成交)
-	fn get_cross_matching_orders(&self, taker: &Order) -> (Vec<(Arc<Order>, i32)>, bool) {
+	pub fn get_cross_matching_orders(&self, taker: &SubmitOrderMessage) -> CrossMatchingResult {
 		let mut result = Vec::new();
 		let mut accumulated_quantity = 0u64;
+		let mut accumulated_volume = Decimal::ZERO;
 		let mut has_self_trade = false;
 		let taker_price = taker.price;
-		let target_quantity = taker.remaining_quantity;
+		let target_quantity = taker.quantity;
+		let target_volume = taker.volume;
+		// 用于市价买单跟踪剩余volume（外部作用域，避免局部变量丢失）
+		let mut market_buy_remaining_volume = target_volume;
 
 		// 选择taker对应的orderbook
 		let orderbook = if taker.symbol.token_id == self.token_0_id { &self.token_0_orderbook } else { &self.token_1_orderbook };
 
-		match taker.side {
-			OrderSide::Buy => {
-				// 买单：遍历asks，价格从小到大
-				for (price_key, orders) in orderbook.asks.iter() {
-					if *price_key > taker_price {
-						break; // 价格超出taker限价，停止
-					}
-					for order in orders {
-						// 自成交检测
-						if order.user_id == taker.user_id {
-							has_self_trade = true;
-							return (result, has_self_trade);
+		match taker.order_type {
+			OrderType::Limit => {
+				// 限价单：根据买卖方向跟taker的price比较
+				match taker.side {
+					OrderSide::Buy => {
+						// 买单：遍历asks，价格从小到大
+						for (price_key, orders) in orderbook.asks.iter() {
+							if *price_key > taker_price {
+								break; // 价格超出taker限价，停止
+							}
+							for order in orders {
+								// 自成交检测
+								if order.user_id == taker.user_id {
+									has_self_trade = true;
+									let filled_quantity = accumulated_quantity;
+									let filled_volume = accumulated_volume;
+									let remaining_quantity = target_quantity - accumulated_quantity;
+									let remaining_volume = checked_sub(target_volume, accumulated_volume, "limit buy remaining_volume").unwrap_or(Decimal::ZERO);
+									return CrossMatchingResult { matched_orders: result, filled_quantity, remaining_quantity, filled_volume, remaining_volume, has_self_trade };
+								}
+								// 计算本次能吃的数量
+								let remaining_needed = target_quantity - accumulated_quantity;
+								let match_quantity = order.remaining_quantity.min(remaining_needed);
+								let match_cost = checked_mul(price_decimal(*price_key), quantity_decimal(match_quantity), "limit buy match_cost").unwrap_or(Decimal::ZERO);
+								accumulated_quantity += match_quantity;
+								accumulated_volume = checked_add(accumulated_volume, match_cost, "limit buy accumulated_volume").unwrap_or(accumulated_volume);
+								result.push((Arc::clone(order), *price_key, match_quantity));
+								if accumulated_quantity >= target_quantity {
+									let filled_quantity = accumulated_quantity;
+									let filled_volume = accumulated_volume;
+									let remaining_quantity = 0;
+									let remaining_volume = checked_sub(target_volume, accumulated_volume, "limit buy final remaining_volume").unwrap_or(Decimal::ZERO);
+									return CrossMatchingResult { matched_orders: result, filled_quantity, remaining_quantity, filled_volume, remaining_volume, has_self_trade };
+								}
+							}
 						}
-						accumulated_quantity += order.remaining_quantity;
-						result.push((Arc::clone(order), *price_key));
-						if accumulated_quantity >= target_quantity {
-							return (result, has_self_trade);
+					}
+					OrderSide::Sell => {
+						// 卖单：遍历bids，价格从大到小（bids的key是负数，从小到大遍历即价格从大到小）
+						for (price_key, orders) in orderbook.bids.iter() {
+							let price = -*price_key;
+							if price < taker_price {
+								break; // 价格低于taker限价，停止
+							}
+							for order in orders {
+								// 自成交检测
+								if order.user_id == taker.user_id {
+									has_self_trade = true;
+									let filled_quantity = accumulated_quantity;
+									let filled_volume = accumulated_volume;
+									let remaining_quantity = target_quantity - accumulated_quantity;
+									// 限价卖单：remaining_volume为0，不需要计算
+									return CrossMatchingResult { matched_orders: result, filled_quantity, remaining_quantity, filled_volume, remaining_volume: Decimal::ZERO, has_self_trade };
+								}
+								// 计算本次能吃的数量
+								let remaining_needed = target_quantity - accumulated_quantity;
+								let match_quantity = order.remaining_quantity.min(remaining_needed);
+								let match_income = checked_mul(price_decimal(price), quantity_decimal(match_quantity), "limit sell match_income").unwrap_or(Decimal::ZERO);
+								accumulated_quantity += match_quantity;
+								accumulated_volume = checked_add(accumulated_volume, match_income, "limit sell accumulated_volume").unwrap_or(accumulated_volume);
+								result.push((Arc::clone(order), price, match_quantity));
+								if accumulated_quantity >= target_quantity {
+									let filled_quantity = accumulated_quantity;
+									let filled_volume = accumulated_volume;
+									let remaining_quantity = 0;
+									// 限价卖单：remaining_volume为0，不需要计算
+									return CrossMatchingResult { matched_orders: result, filled_quantity, remaining_quantity, filled_volume, remaining_volume: Decimal::ZERO, has_self_trade };
+								}
+							}
 						}
 					}
 				}
 			}
-			OrderSide::Sell => {
-				// 卖单：遍历bids，价格从大到小（bids的key是负数，从小到大遍历即价格从大到小）
-				for (price_key, orders) in orderbook.bids.iter() {
-					let price = -*price_key;
-					if price < taker_price {
-						break; // 价格低于taker限价，停止
-					}
-					for order in orders {
-						// 自成交检测
-						if order.user_id == taker.user_id {
-							has_self_trade = true;
-							return (result, has_self_trade);
+			OrderType::Market => {
+				// 市价单：直接用taker的price比较，不计算平均价
+				match taker.side {
+					OrderSide::Buy => {
+						// 市价买单：使用volume预算而非quantity目标，remaining_quantity固定为0
+						// 买单：遍历asks，价格从小到大
+						for (price_key, orders) in orderbook.asks.iter() {
+							let price = *price_key;
+							// 价格超出taker限价，停止（跟限价单一样）
+							if price > taker_price {
+								break;
+							}
+
+							for order in orders {
+								// 自成交检测
+								if order.user_id == taker.user_id {
+									has_self_trade = true;
+									let filled_quantity = accumulated_quantity;
+									let filled_volume = accumulated_volume;
+									return CrossMatchingResult {
+										matched_orders: result,
+										filled_quantity,
+										remaining_quantity: 0,
+										filled_volume,
+										remaining_volume: market_buy_remaining_volume,
+										has_self_trade,
+									};
+								}
+
+								// 计算本单的最大可购买量: min(order剩余量, 剩余预算/价格)
+								let max_quantity_by_volume = {
+									let price_dec = price_decimal(price);
+									let qty_dec = quantity_decimal(order.remaining_quantity);
+									let cost = checked_mul(price_dec, qty_dec, "market buy cost").unwrap_or(Decimal::MAX);
+									if cost > market_buy_remaining_volume {
+										// 预算不足以吃完整个订单，计算能吃多少
+										if price_dec > Decimal::ZERO {
+											// affordable_qty_dec = remaining_volume / price_dec
+											let affordable_qty_dec = market_buy_remaining_volume.checked_div(price_dec).unwrap_or(Decimal::ZERO);
+											// 转换回u64 (乘以100)
+											let result = affordable_qty_dec.checked_mul(Decimal::ONE_HUNDRED).unwrap_or(Decimal::ZERO);
+											result.to_u64().unwrap_or(0)
+										} else {
+											0
+										}
+									} else {
+										order.remaining_quantity
+									}
+								};
+
+								if max_quantity_by_volume == 0 {
+									// 预算用完
+									let filled_quantity = accumulated_quantity;
+									let filled_volume = accumulated_volume;
+									return CrossMatchingResult {
+										matched_orders: result,
+										filled_quantity,
+										remaining_quantity: 0,
+										filled_volume,
+										remaining_volume: market_buy_remaining_volume,
+										has_self_trade,
+									};
+								}
+
+								let match_quantity = order.remaining_quantity.min(max_quantity_by_volume);
+
+								// 计算本次成交的USDC成本
+								let match_cost = checked_mul(price_decimal(price), quantity_decimal(match_quantity), "market buy match_cost").unwrap_or(Decimal::ZERO);
+
+								accumulated_quantity += match_quantity;
+								accumulated_volume = checked_add(accumulated_volume, match_cost, "market buy accumulated_volume").unwrap_or(accumulated_volume); // 累加 volume
+								market_buy_remaining_volume = checked_sub(market_buy_remaining_volume, match_cost, "market buy remaining_volume").unwrap_or(Decimal::ZERO);
+								result.push((Arc::clone(order), price, match_quantity));
+
+								if market_buy_remaining_volume <= Decimal::ZERO {
+									let filled_quantity = accumulated_quantity;
+									let filled_volume = accumulated_volume;
+									return CrossMatchingResult { matched_orders: result, filled_quantity, remaining_quantity: 0, filled_volume, remaining_volume: Decimal::ZERO, has_self_trade };
+								}
+							}
 						}
-						accumulated_quantity += order.remaining_quantity;
-						result.push((Arc::clone(order), price));
-						if accumulated_quantity >= target_quantity {
-							return (result, has_self_trade);
+					}
+					OrderSide::Sell => {
+						// 市价卖单：使用quantity目标，remaining_volume固定为0
+						// 卖单：遍历bids，价格从大到小
+						for (price_key, orders) in orderbook.bids.iter() {
+							let price = -*price_key;
+							// 价格低于taker限价，停止（跟限价单一样）
+							if price < taker_price {
+								break;
+							}
+
+							for order in orders {
+								// 自成交检测
+								if order.user_id == taker.user_id {
+									has_self_trade = true;
+									let filled_quantity = accumulated_quantity;
+									let filled_volume = accumulated_volume;
+									let remaining_quantity = target_quantity - accumulated_quantity;
+									return CrossMatchingResult { matched_orders: result, filled_quantity, remaining_quantity, filled_volume, remaining_volume: Decimal::ZERO, has_self_trade };
+								}
+
+								// 计算本次能吃的数量（不能超过 target_quantity）
+								let remaining_needed = target_quantity - accumulated_quantity;
+								let match_quantity = order.remaining_quantity.min(remaining_needed);
+
+								// 市价卖单也要累积volume
+								let match_income = checked_mul(price_decimal(price), quantity_decimal(match_quantity), "market sell match_income").unwrap_or(Decimal::ZERO);
+								accumulated_quantity += match_quantity;
+								accumulated_volume = checked_add(accumulated_volume, match_income, "market sell accumulated_volume").unwrap_or(accumulated_volume);
+								result.push((Arc::clone(order), price, match_quantity));
+
+								if accumulated_quantity >= target_quantity {
+									let filled_quantity = accumulated_quantity;
+									let filled_volume = accumulated_volume;
+									return CrossMatchingResult { matched_orders: result, filled_quantity, remaining_quantity: 0, filled_volume, remaining_volume: Decimal::ZERO, has_self_trade };
+								}
+							}
 						}
 					}
 				}
 			}
 		}
 
-		(result, has_self_trade)
+		// 如果遍历完所有订单后还有剩余
+		let remaining_quantity = if taker.order_type == OrderType::Market && taker.side == OrderSide::Buy {
+			0 // 市价买单没有quantity目标
+		} else {
+			target_quantity - accumulated_quantity
+		};
+
+		let remaining_volume = match (taker.order_type, taker.side) {
+			(OrderType::Market, OrderSide::Buy) => market_buy_remaining_volume, // 市价买单使用循环中维护的值
+			(OrderType::Market, OrderSide::Sell) => Decimal::ZERO,              // 市价卖单：remaining_volume为0
+			(OrderType::Limit, OrderSide::Buy) => checked_sub(target_volume, accumulated_volume, "limit buy final remaining_volume").unwrap_or(Decimal::ZERO), // 限价买单
+			(OrderType::Limit, OrderSide::Sell) => Decimal::ZERO,               // 限价卖单：remaining_volume为0，不需要计算
+		};
+
+		let filled_quantity = accumulated_quantity;
+		let filled_volume = accumulated_volume;
+
+		CrossMatchingResult { matched_orders: result, filled_quantity, remaining_quantity, filled_volume, remaining_volume, has_self_trade }
 	}
 
-	pub fn match_order(&mut self, taker: &Order) -> anyhow::Result<(u64, Vec<Trade>, rust_decimal::Decimal, bool)> {
-		let mut remaining_quantity = taker.quantity;
+	pub fn match_order(&mut self, taker: &SubmitOrderMessage) -> anyhow::Result<MatchingResult> {
 		let mut trades = Vec::new();
-		let mut taker_total_usdc_amount = rust_decimal::Decimal::ZERO;
-		// 使用交叉撮合获取匹配订单，返回(Arc<Order>, 匹配价格)的列表，以及是否遇到自成交
-		let (maker_orders_with_price, has_self_trade) = self.get_cross_matching_orders(taker);
+		// let mut taker_total_usdc_amount = Decimal::ZERO;
+		// 使用交叉撮合获取匹配订单
+		let cross_matching_result = self.get_cross_matching_orders(taker);
 		let timestamp = Utc::now().timestamp_millis();
 
-		for (maker_order, match_price) in maker_orders_with_price {
+		for (maker_order, match_price, matched_quantity) in cross_matching_result.matched_orders {
 			// 禁止自成交：taker 不能吃自己的单（理论上在 get_cross_matching_orders 已检测）
 			if maker_order.user_id == taker.user_id {
 				continue;
 			}
 
-			let matched_quantity = remaining_quantity.min(maker_order.remaining_quantity);
+			// 直接使用get_cross_matching_orders返回的matched_quantity
 			let maker_new_quantity = maker_order.remaining_quantity - matched_quantity;
 			let maker_price = maker_order.price;
 			let maker_order_id = &maker_order.order_id; // 使用引用避免 clone
@@ -491,8 +699,8 @@ impl MatchEngine {
 			};
 
 			// 累加 taker_total_usdc_amount
-			let taker_usdc_decimal = Decimal::from_str_exact(&taker_usdc).map_err(|e| anyhow::anyhow!("Invalid taker_usdc_amount: {}", e))?;
-			taker_total_usdc_amount = checked_add(taker_total_usdc_amount, taker_usdc_decimal, "taker_total_usdc_amount")?;
+			// let taker_usdc_decimal = Decimal::from_str_exact(&taker_usdc).map_err(|e| anyhow::anyhow!("Invalid taker_usdc_amount: {}", e))?;
+			// taker_total_usdc_amount = checked_add(taker_total_usdc_amount, taker_usdc_decimal, "taker_total_usdc_amount")?;
 
 			trades.push(trade);
 
@@ -536,33 +744,63 @@ impl MatchEngine {
 					error!("Failed to publish maker order updated event to store: {}", e);
 				}
 			}
-
-			remaining_quantity -= matched_quantity;
-
-			if remaining_quantity == 0 {
-				break;
-			}
 		}
 
-		Ok((remaining_quantity, trades, taker_total_usdc_amount, has_self_trade))
+		// Construct final MatchingResult with trades
+		Ok(MatchingResult {
+			trades,
+			filled_quantity: cross_matching_result.filled_quantity,
+			remaining_quantity: cross_matching_result.remaining_quantity,
+			filled_volume: cross_matching_result.filled_volume,
+			remaining_volume: cross_matching_result.remaining_volume,
+			has_self_trade: cross_matching_result.has_self_trade,
+		})
+	}
+
+	/// 验证订单消息
+	pub fn validate_order_message(&self, order_msg: &SubmitOrderMessage) -> bool {
+		if self.event_id != order_msg.symbol.event_id || self.market_id != order_msg.symbol.market_id {
+			return false;
+		}
+
+		// quantity=0 只对市价买单有效
+		if order_msg.quantity == 0 && !(order_msg.order_type == OrderType::Market && order_msg.side == OrderSide::Buy) {
+			return false;
+		}
+
+		if order_msg.user_id == 0 {
+			return false;
+		}
+
+		// 价格范围验证
+		if !(100..=9900).contains(&order_msg.price) {
+			return false;
+		}
+
+		true
 	}
 
 	//订单变化要推到mq 给ws/processor/redis
-	pub fn submit_order(&mut self, taker: &mut Order) -> anyhow::Result<()> {
-		if !self.validate_order(taker) {
+	pub fn submit_order(&mut self, taker_msg: &SubmitOrderMessage, order_num: u64) -> anyhow::Result<()> {
+		// 完整验证
+		if !self.validate_order_message(taker_msg) {
 			return Err(anyhow::anyhow!("Invalid order"));
 		}
 
-		let (remaining_quantity, trades, taker_total_usdc_amount, has_self_trade) = self.match_order(taker)?;
-		taker.remaining_quantity = remaining_quantity;
-		taker.filled_quantity = taker.quantity - remaining_quantity;
+		let matching_result = self.match_order(taker_msg)?;
+		let remaining_quantity = matching_result.remaining_quantity;
+		let remaining_volume = matching_result.remaining_volume;
+		let filled_quantity = matching_result.filled_quantity;
+		let _filled_volume = matching_result.filled_volume;
+		let trades = matching_result.trades;
+		let has_self_trade = matching_result.has_self_trade;
 
 		// 更新最新成交价格
 		if let Some(last_trade) = trades.last() {
 			let taker_price = &last_trade.taker_price;
 			// 计算另一个token的价格: 1 - taker_price
 			let other_price = (rust_decimal::Decimal::ONE - rust_decimal::Decimal::from_str_exact(taker_price).unwrap_or(rust_decimal::Decimal::ZERO)).normalize().to_string();
-			if taker.symbol.token_id == self.token_0_id {
+			if taker_msg.symbol.token_id == self.token_0_id {
 				self.token_0_latest_trade_price = taker_price.clone();
 				self.token_1_latest_trade_price = other_price;
 			} else {
@@ -572,95 +810,108 @@ impl MatchEngine {
 		}
 
 		// 有成交就推送成交消息
-		if taker.filled_quantity > 0 {
-			//不然就是默认的new
-			taker.status = OrderStatus::PartiallyFilled;
-			if remaining_quantity == 0 {
-				taker.status = OrderStatus::Filled;
-			}
+		if filled_quantity > 0 {
 			// 推送 Processor 消息（部分成交）
 			if let Err(e) = publish_to_processor(ProcessorMessage::OrderTraded(OrderTraded {
-				taker_symbol: taker.symbol.clone(),
-				taker_id: taker.user_id,
-				taker_privy_user_id: taker.privy_id.clone(),
-				taker_outcome_name: taker.outcome_name.clone(),
-				taker_order_id: taker.order_id.clone(),
-				taker_order_side: taker.side,
-				taker_token_id: taker.symbol.token_id.clone(),
+				taker_symbol: taker_msg.symbol.clone(),
+				taker_id: taker_msg.user_id,
+				taker_privy_user_id: taker_msg.privy_id.clone(),
+				taker_outcome_name: taker_msg.outcome_name.clone(),
+				taker_order_id: taker_msg.order_id.clone(),
+				taker_order_side: taker_msg.side,
+				taker_token_id: taker_msg.symbol.token_id.clone(),
 				trades,
 			})) {
 				error!("Failed to publish order traded event to processor: {}", e);
 			}
 		}
 
-		//然后看剩余等于0啥也没有表示吃完了 否则看类型 限价单就是挂单 市价单就是吃不完就取消
-		if remaining_quantity > 0 {
-			// 如果检测到自成交，取消剩余订单（无论是限价单还是市价单）
-			if has_self_trade {
-				// cancelled_volume = price * quantity - taker_total_usdc_amount (总冻结值 - 已成交总价值)
-				let total_freeze = checked_mul(price_decimal(taker.price), quantity_decimal(taker.quantity), "self-trade total_freeze")?;
-				let cancelled_volume = checked_sub(total_freeze, taker_total_usdc_amount, "self-trade cancelled_volume")?;
-				let cancelled = OrderCancelled {
-					order_id: taker.order_id.clone(),
-					symbol: taker.symbol.clone(),
-					user_id: taker.user_id,
-					privy_id: taker.privy_id.clone(),
-					cancelled_quantity: format_quantity(taker.remaining_quantity),
-					cancelled_volume: cancelled_volume.normalize().to_string(),
-				};
-				if let Err(e) = publish_to_processor(ProcessorMessage::OrderCancelled(cancelled)) {
-					error!("Failed to publish order cancelled event to processor: {}", e);
-				}
-				return Ok(());
+		// 如果检测到自成交，取消剩余订单（无论是限价单还是市价单）
+		if has_self_trade {
+			// cancelled_volume直接使用remaining_volume
+			let cancelled = OrderCancelled {
+				order_id: taker_msg.order_id.clone(),
+				symbol: taker_msg.symbol.clone(),
+				user_id: taker_msg.user_id,
+				privy_id: taker_msg.privy_id.clone(),
+				cancelled_quantity: format_quantity(remaining_quantity),
+				cancelled_volume: remaining_volume.normalize().to_string(),
+			};
+			if let Err(e) = publish_to_processor(ProcessorMessage::OrderCancelled(cancelled)) {
+				error!("Failed to publish order cancelled event to processor: {}", e);
 			}
+			return Ok(());
+		}
 
-			//只能是限价单才能放在订单簿当作maker并发送订单创建消息 否则取消
-			if taker.order_type == OrderType::Limit {
+		//然后看剩余等于0啥也没有表示吃完了 否则看类型 限价单就是挂单 市价单就是吃不完就取消
+
+		//只能是限价单才能放在订单簿当作maker并发送订单创建消息 否则取消
+		if taker_msg.order_type == OrderType::Limit {
+			if remaining_quantity > 0 {
 				let submitted = OrderSubmitted {
-					order_id: taker.order_id.clone(),
-					symbol: taker.symbol.clone(),
-					side: taker.side,
-					order_type: taker.order_type,
-					quantity: format_quantity(taker.quantity),
-					price: format_price(taker.price),
-					filled_quantity: format_quantity(taker.filled_quantity),
-					user_id: taker.user_id,
-					privy_id: taker.privy_id.clone(),
-					outcome_name: taker.outcome_name.clone(),
+					order_id: taker_msg.order_id.clone(),
+					symbol: taker_msg.symbol.clone(),
+					side: taker_msg.side,
+					order_type: taker_msg.order_type,
+					quantity: format_quantity(taker_msg.quantity),
+					price: format_price(taker_msg.price),
+					filled_quantity: format_quantity(filled_quantity),
+					user_id: taker_msg.user_id,
+					privy_id: taker_msg.privy_id.clone(),
+					outcome_name: taker_msg.outcome_name.clone(),
 				};
 				if let Err(e) = publish_to_processor(ProcessorMessage::OrderSubmitted(submitted)) {
 					error!("Failed to publish order submitted event to processor: {}", e);
 				}
 
+				// 从SubmitOrderMessage构造Order（限价单）
+				let mut limit_order = Order::new(
+					taker_msg.order_id.clone(),
+					taker_msg.symbol.clone(),
+					taker_msg.side,
+					taker_msg.order_type,
+					taker_msg.quantity,
+					taker_msg.price,
+					taker_msg.user_id,
+					taker_msg.privy_id.clone(),
+					taker_msg.outcome_name.clone(),
+				)?;
+				// 设置撮合结果
+				limit_order.filled_quantity = filled_quantity;
+				limit_order.remaining_quantity = remaining_quantity;
+				limit_order.order_num = order_num;
+				limit_order.status = if filled_quantity > 0 { OrderStatus::PartiallyFilled } else { OrderStatus::New };
+
 				// 创建Arc<Order>，只clone一次Order，后续使用Arc::clone
-				let taker_arc = Arc::new(taker.clone());
+				let taker_arc = Arc::new(limit_order.clone());
 
 				// 根据token_id路由到对应的OrderBook，同时交叉插入到对方OrderBook
-				if taker.symbol.token_id == self.token_0_id {
+				if taker_msg.symbol.token_id == self.token_0_id {
 					self.token_0_orderbook.add_order(Arc::clone(&taker_arc))?;
 					self.token_1_orderbook.add_cross_order(Arc::clone(&taker_arc))?; // 交叉插入
-					self.token_0_orders.insert(taker.order_id.clone(), Arc::clone(&taker_arc));
+					self.token_0_orders.insert(taker_msg.order_id.clone(), Arc::clone(&taker_arc));
 				} else {
 					self.token_1_orderbook.add_order(Arc::clone(&taker_arc))?;
 					self.token_0_orderbook.add_cross_order(Arc::clone(&taker_arc))?; // 交叉插入
-					self.token_1_orders.insert(taker.order_id.clone(), Arc::clone(&taker_arc));
+					self.token_1_orders.insert(taker_msg.order_id.clone(), Arc::clone(&taker_arc));
 				}
 				// 推送订单创建事件到 store（新订单加入订单簿）
-				if let Err(e) = publish_order_change_to_store(OrderChangeEvent::OrderCreated(taker.clone())) {
+				if let Err(e) = publish_order_change_to_store(OrderChangeEvent::OrderCreated(limit_order)) {
 					error!("Failed to publish order created event to store: {}", e);
 				}
-			} else {
-				//市价单吃不完就取消剩余的那部分 要发送到Processor
-				// cancelled_volume = price * quantity - taker_total_usdc_amount (总冻结值 - 已成交总价值)
-				let total_freeze = checked_mul(price_decimal(taker.price), quantity_decimal(taker.quantity), "market order total_freeze")?;
-				let cancelled_volume = checked_sub(total_freeze, taker_total_usdc_amount, "market order cancelled_volume")?;
+			}
+		} else {
+			//市价单吃不完就取消剩余的那部分 要发送到Processor
+			// cancelled_volume直接使用remaining_volume
+			if taker_msg.order_type == OrderType::Market && ((taker_msg.side == OrderSide::Buy && remaining_volume.gt(&Decimal::ZERO)) || (taker_msg.side == OrderSide::Sell && remaining_quantity > 0))
+			{
 				let cancelled = OrderCancelled {
-					order_id: taker.order_id.clone(),
-					symbol: taker.symbol.clone(),
-					user_id: taker.user_id,
-					privy_id: taker.privy_id.clone(),
-					cancelled_quantity: format_quantity(taker.remaining_quantity),
-					cancelled_volume: cancelled_volume.normalize().to_string(),
+					order_id: taker_msg.order_id.clone(),
+					symbol: taker_msg.symbol.clone(),
+					user_id: taker_msg.user_id,
+					privy_id: taker_msg.privy_id.clone(),
+					cancelled_quantity: format_quantity(remaining_quantity),    //sell
+					cancelled_volume: remaining_volume.normalize().to_string(), //buy
 				};
 				if let Err(e) = publish_to_processor(ProcessorMessage::OrderCancelled(cancelled)) {
 					error!("Failed to publish order cancelled event to processor: {}", e);
@@ -668,7 +919,6 @@ impl MatchEngine {
 				return Ok(());
 			}
 		}
-
 		Ok(())
 	}
 
@@ -707,24 +957,6 @@ impl MatchEngine {
 		}
 
 		Ok(())
-	}
-
-	pub fn validate_order(&self, order: &Order) -> bool {
-		if self.event_id != order.symbol.event_id || self.market_id != order.symbol.market_id {
-			return false;
-		}
-
-		if order.quantity == 0 {
-			return false;
-		}
-		// if order.order_type == OrderType::Limit && order.price.is_none() {
-		// 	return false;
-		// }
-
-		if order.user_id == 0 {
-			return false;
-		}
-		true
 	}
 
 	/// 分批次取消所有订单
@@ -775,25 +1007,53 @@ impl MatchEngine {
 		Ok(())
 	}
 
+	// 提取退出逻辑为独立方法
+	async fn shutdown_and_cancel_all_orders(&mut self) {
+		// 收集所有需要取消的订单
+		let mut all_orders: Vec<(String, i64, String, PredictionSymbol, u64, i32)> = Vec::new();
+
+		for (order_id, order) in self.token_0_orders.iter() {
+			all_orders.push((order_id.clone(), order.user_id, order.privy_id.clone(), order.symbol.clone(), order.remaining_quantity, order.price));
+		}
+
+		for (order_id, order) in self.token_1_orders.iter() {
+			all_orders.push((order_id.clone(), order.user_id, order.privy_id.clone(), order.symbol.clone(), order.remaining_quantity, order.price));
+		}
+
+		if !all_orders.is_empty() {
+			info!("{}/{} Cancelling {} orders in batches", self.event_id, self.market_id, all_orders.len());
+
+			// 分批次取消订单
+			if let Err(e) = self.cancel_all_orders_in_batches(all_orders).await {
+				error!("{}/{} Failed to cancel all orders: {}", self.event_id, self.market_id, e);
+			}
+		}
+
+		info!("{}/{} MatchEngine shutting down", self.event_id, self.market_id);
+	}
+
 	pub async fn run(&mut self) {
 		let mut snapshot_interval = interval(Duration::from_secs(1));
 		snapshot_interval.tick().await;
+
+		// 取出 market_exit_receiver（需要从 self 中取出避免在 select! 中 borrow 冲突）
+		// 使用 &mut 引用避免在 loop 中被 move
+		let mut market_exit_rx = self.market_exit_receiver.take().expect("market_exit_receiver should be Some");
 
 		loop {
 			select! {
 				Some(control) = self.order_receiver.recv() => {
 					match control {
-						OrderBookControl::SubmitOrder(order) => {
-							let mut new_order = order.clone();
-							new_order.order_num = self.order_num;
+						OrderBookControl::SubmitOrder(order_msg) => {
+							let order_num = self.order_num;
 							self.order_num += 1;
-							if let Err(e) = self.submit_order(&mut new_order) {
+							if let Err(e) = self.submit_order(&order_msg, order_num) {
 								// 撮合失败，发送拒绝消息
 								let rejected = OrderRejected {
-									order_id: new_order.order_id.clone(),
-									symbol: new_order.symbol.clone(),
-									user_id: new_order.user_id,
-									privy_id: new_order.privy_id.clone(),
+									order_id: order_msg.order_id.clone(),
+									symbol: order_msg.symbol.clone(),
+									user_id: order_msg.user_id,
+									privy_id: order_msg.privy_id.clone(),
 									reason: e.to_string(),
 								};
 								let _ = publish_to_processor(ProcessorMessage::OrderRejected(rejected));
@@ -809,29 +1069,13 @@ impl MatchEngine {
 					self.handle_snapshot_tick();
 				}
 				_ = self.exit_receiver.recv() => {
-					info!("{}/{} MatchEngine received exit signal, cancelling all orders", self.event_id, self.market_id);
-
-					// 收集所有需要取消的订单
-					let mut all_orders: Vec<(String, i64, String, PredictionSymbol, u64, i32)> = Vec::new();
-
-					for (order_id, order) in self.token_0_orders.iter() {
-						all_orders.push((order_id.clone(), order.user_id, order.privy_id.clone(), order.symbol.clone(), order.remaining_quantity, order.price));
-					}
-
-					for (order_id, order) in self.token_1_orders.iter() {
-						all_orders.push((order_id.clone(), order.user_id, order.privy_id.clone(), order.symbol.clone(), order.remaining_quantity, order.price));
-					}
-
-					if !all_orders.is_empty() {
-						info!("{}/{} Cancelling {} orders in batches", self.event_id, self.market_id, all_orders.len());
-
-						// 分批次取消订单
-						if let Err(e) = self.cancel_all_orders_in_batches(all_orders).await {
-							error!("{}/{} Failed to cancel all orders: {}", self.event_id, self.market_id, e);
-						}
-					}
-
-					info!("{}/{} MatchEngine shutting down", self.event_id, self.market_id);
+					info!("{}/{} MatchEngine received global exit signal, cancelling all orders", self.event_id, self.market_id);
+					self.shutdown_and_cancel_all_orders().await;
+					return;
+				}
+				_ = &mut market_exit_rx => {
+					info!("{}/{} MatchEngine received market exit signal, cancelling all orders", self.event_id, self.market_id);
+					self.shutdown_and_cancel_all_orders().await;
 					return;
 				}
 			}

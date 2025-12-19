@@ -140,6 +140,7 @@
         "outcome_0_best_ask": "0.66",
         "outcome_1_best_bid": "0.34",
         "outcome_1_best_ask": "0.36",
+        "closed": false,
         "winner_outcome_name": "",
         "winner_outcome_token_id": ""
       }
@@ -147,6 +148,15 @@
   }
 }
 ```
+
+**字段说明:**
+- `volume` (Event 级别): 事件总交易量（所有市场的交易量之和）
+- `closed` (Event 级别): 整个事件是否已关闭
+- `resolved` (Event 级别): 整个事件是否已结算
+- `markets[].volume` (Market 级别): **单个市场的交易量** - 该市场内所有交易的累计金额
+- `markets[].closed` (Market 级别): **单个市场是否已关闭** - 每个市场可以独立关闭，无需等待整个事件关闭
+- `markets[].winner_outcome_name`: 获胜结果名称（市场关闭后填充）
+- `markets[].winner_outcome_token_id`: 获胜 token ID（市场关闭后填充）
 
 ---
 

@@ -102,11 +102,20 @@ CREATE TABLE orders (
     order_side order_side NOT NULL,
     order_type order_type NOT NULL,
 
-    price DECIMAL(20, 18) NOT NULL,
-    quantity DECIMAL(30, 18) NOT NULL,
-    volume DECIMAL(30, 18) NOT NULL,
+    price DECIMAL(20, 18) NOT NULL DEFAULT 0,
+    quantity DECIMAL(30, 18) NOT NULL DEFAULT 0,
+    volume DECIMAL(30, 18) NOT NULL DEFAULT 0,
     filled_quantity DECIMAL(30, 18) NOT NULL DEFAULT 0,
     cancelled_quantity DECIMAL(30, 18) NOT NULL DEFAULT 0,
+
+    market_price DECIMAL(20, 18) NOT NULL DEFAULT 0,
+    market_volume DECIMAL(30, 18) NOT NULL DEFAULT 0,
+    market_quantity DECIMAL(30, 18) NOT NULL DEFAULT 0,
+    market_filled_quantity DECIMAL(30, 18) NOT NULL DEFAULT 0,
+    market_cancelled_quantity DECIMAL(30, 18) NOT NULL DEFAULT 0,
+    market_filled_volume DECIMAL(30, 18) NOT NULL DEFAULT 0,
+    market_cancelled_volume DECIMAL(30, 18) NOT NULL DEFAULT 0,
+
     status order_status NOT NULL DEFAULT 'new',
 
     signature_order_msg JSONB NOT NULL,
@@ -195,8 +204,8 @@ CREATE TABLE asset_history (
     order_id TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
-    -- Unique constraint for deduplication
-    CONSTRAINT uq_asset_history UNIQUE (user_id, history_type, tx_hash, trade_id, order_id)
+    -- Unique constraint for deduplication (NULLS NOT DISTINCT ensures NULL values are treated as equal)
+    CONSTRAINT uq_asset_history UNIQUE NULLS NOT DISTINCT (user_id, history_type, tx_hash, token_id, trade_id, order_id)
 );
 
 -- Operation history table
@@ -303,7 +312,7 @@ COMMENT ON TABLE asset_history IS 'Asset balance change audit trail';
 COMMENT ON TABLE operation_history IS 'User trading operations (buy/sell/redeem/split/merge)';
 
 COMMENT ON CONSTRAINT uq_asset_history ON asset_history IS
-    'Ensures deduplication - same user cannot have duplicate operations for same combination of user_id, history_type, tx_hash, trade_id, and order_id';
+    'Ensures deduplication with NULLS NOT DISTINCT - prevents duplicate operations for same (user_id, history_type, tx_hash, token_id, trade_id, order_id). NULL values are treated as equal, enabling proper deduplication for deposits/withdrawals where trade_id and order_id are NULL';
 
 -- ============================================================================
 -- PERFORMANCE NOTES

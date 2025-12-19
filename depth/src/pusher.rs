@@ -83,34 +83,44 @@ async fn push_to_websocket_stream(depths: &[WebSocketDepth]) -> anyhow::Result<(
 /// 批量更新缓存 Redis (使用 HSET)
 /// hash key: "depth", field: event_id::market_id, value: WebSocketDepth JSON
 /// hash key: "price", field: event_id::market_id, value: CacheMarketPriceInfo JSON
+/// 按 event_id 分组，每个 event 单独执行一次 pipeline，避免命令过多导致阻塞
 async fn update_cache_redis(depths: &[WebSocketDepth]) -> anyhow::Result<()> {
 	let mut conn = common::redis_pool::get_cache_redis_connection().await?;
 
-	let mut pipe = redis::pipe();
-
+	// 按 event_id 分组
+	let mut event_groups: HashMap<i64, Vec<&WebSocketDepth>> = HashMap::new();
 	for depth in depths {
-		let field = market_field(depth.event_id, depth.market_id);
-
-		// HSET depth field value
-		let depth_value = serde_json::to_string(depth)?;
-		pipe.hset(DEPTH_CACHE_KEY, &field, depth_value);
-
-		// 构建 CacheMarketPriceInfo
-		let mut prices = HashMap::new();
-		for (token_id, token_info) in &depth.depths {
-			let best_bid = token_info.bids.first().map(|p| p.price.clone()).unwrap_or_default();
-			let best_ask = token_info.asks.first().map(|p| p.price.clone()).unwrap_or_default();
-			prices.insert(token_id.clone(), CacheTokenPriceInfo { best_bid, best_ask, latest_trade_price: token_info.latest_trade_price.clone() });
-		}
-		let price_info = CacheMarketPriceInfo { update_id: depth.update_id, timestamp: depth.timestamp, prices };
-
-		// HSET price field value
-		let price_value = serde_json::to_string(&price_info)?;
-		pipe.hset(PRICE_CACHE_KEY, &field, price_value);
+		event_groups.entry(depth.event_id).or_default().push(depth);
 	}
 
-	// 批量执行
-	let _: () = pipe.query_async(&mut conn).await?;
+	// 每个 event 单独执行一次 pipeline
+	for depths_in_event in event_groups.values() {
+		let mut pipe = redis::pipe();
+
+		for depth in depths_in_event {
+			let field = market_field(depth.event_id, depth.market_id);
+
+			// HSET depth field value
+			let depth_value = serde_json::to_string(depth)?;
+			pipe.hset(DEPTH_CACHE_KEY, &field, depth_value);
+
+			// 构建 CacheMarketPriceInfo
+			let mut prices = HashMap::new();
+			for (token_id, token_info) in &depth.depths {
+				let best_bid = token_info.bids.first().map(|p| p.price.clone()).unwrap_or_default();
+				let best_ask = token_info.asks.first().map(|p| p.price.clone()).unwrap_or_default();
+				prices.insert(token_id.clone(), CacheTokenPriceInfo { best_bid, best_ask, latest_trade_price: token_info.latest_trade_price.clone() });
+			}
+			let price_info = CacheMarketPriceInfo { update_id: depth.update_id, timestamp: depth.timestamp, prices };
+
+			// HSET price field value
+			let price_value = serde_json::to_string(&price_info)?;
+			pipe.hset(PRICE_CACHE_KEY, &field, price_value);
+		}
+
+		// 执行单个 event 的 pipeline
+		let _: () = pipe.query_async(&mut conn).await?;
+	}
 
 	Ok(())
 }

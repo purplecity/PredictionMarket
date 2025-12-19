@@ -42,3 +42,12 @@ pub static DEPTH_GROUP: OnceCell<Group<String, DepthResponse, Error>> = OnceCell
 pub async fn get_depth_group() -> &'static Group<String, DepthResponse, Error> {
 	DEPTH_GROUP.get_or_init(|| async { Group::new() }).await
 }
+
+/// Market 验证的 singleflight group
+/// Key: event_id|market_id
+/// 用于下单时避免重复查询缓存和数据库
+pub static MARKET_VALIDATION_GROUP: OnceCell<Group<String, common::event_types::ApiMQEventMarket, crate::cache::CacheError>> = OnceCell::const_new();
+
+pub async fn get_market_validation_group() -> &'static Group<String, common::event_types::ApiMQEventMarket, crate::cache::CacheError> {
+	MARKET_VALIDATION_GROUP.get_or_init(|| async { Group::new() }).await
+}

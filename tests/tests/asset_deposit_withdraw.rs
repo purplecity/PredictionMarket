@@ -140,6 +140,7 @@ async fn test_withdraw_insufficient_balance() {
 }
 
 /// 测试重复存款（幂等性）
+/// 通过 UNIQUE NULLS NOT DISTINCT 约束确保相同 tx_hash 不能重复存款
 #[tokio::test]
 async fn test_duplicate_deposit_idempotency() {
 	// Setup

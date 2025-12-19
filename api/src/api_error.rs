@@ -11,10 +11,10 @@ pub enum ApiErrorCode {
 	InvalidParameter = 2003,
 	/// 用户不存在
 	UserNotFound = 2004,
-	/// Event 不存在
-	EventNotFound = 2005,
-	/// Market 不存在
-	MarketNotFound = 2006,
+	/// Event 不存在或已关闭
+	EventNotFoundOrClosed = 2005,
+	/// Market 不存在或已关闭
+	MarketNotFoundOrClosed = 2006,
 	/// Token ID 不存在
 	TokenIdNotFound = 2007,
 	/// 自定义错误
@@ -47,8 +47,8 @@ impl ApiErrorCode {
 			ApiErrorCode::PrivyNoAddress => "Privy address not set",
 			ApiErrorCode::InvalidParameter => "Invalid parameter",
 			ApiErrorCode::UserNotFound => "User not found",
-			ApiErrorCode::EventNotFound => "Event not found",
-			ApiErrorCode::MarketNotFound => "Market not found",
+			ApiErrorCode::EventNotFoundOrClosed => "Event not found or closed",
+			ApiErrorCode::MarketNotFoundOrClosed => "Market not found or closed",
 			ApiErrorCode::TokenIdNotFound => "Token ID not found",
 			ApiErrorCode::CustomerError => "Customer error",
 			ApiErrorCode::InternalError => "Internal error",

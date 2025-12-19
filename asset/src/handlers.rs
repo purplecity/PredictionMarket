@@ -604,23 +604,44 @@ pub async fn handle_create_order(
 	// 3. 插入 orders 表
 	let now = Utc::now();
 	let order_id = Uuid::new_v4();
+
+	// 根据订单类型决定插入的字段值
+	// 限价单和市价单的字段完全分离：一种类型的单子另一边为 0
+	let (limit_price, limit_quantity, limit_volume, market_price, market_quantity, market_volume) = match order_type {
+		common::engine_types::OrderType::Market => {
+			// 市价单：填充 market_* 字段，price/quantity/volume 为 0
+			(Decimal::ZERO, Decimal::ZERO, Decimal::ZERO, price, quantity, volume)
+		}
+		common::engine_types::OrderType::Limit => {
+			// 限价单：填充 price/quantity/volume，market_* 字段为 0
+			(price, quantity, volume, Decimal::ZERO, Decimal::ZERO, Decimal::ZERO)
+		}
+	};
+
 	sqlx::query(
-		"INSERT INTO orders (id, user_id, event_id, market_id, token_id, outcome, order_side, order_type, price, quantity, volume, filled_quantity, cancelled_quantity, status, signature_order_msg, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)"
+		"INSERT INTO orders (id, user_id, event_id, market_id, token_id, outcome, order_side, order_type, price, quantity, volume, filled_quantity, cancelled_quantity, market_price, market_quantity, market_volume, market_filled_quantity, market_cancelled_quantity, market_filled_volume, market_cancelled_volume, status, signature_order_msg, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)"
 	)
 	.bind(order_id)
 	.bind(user_id)
 	.bind(event_id)
 	.bind(market_id)
 	.bind(token_id)
-	.bind(outcome_name) // outcome - will be filled by match engine
+	.bind(outcome_name)
 	.bind(order_side)
 	.bind(order_type)
-	.bind(price)
-	.bind(quantity)
-	.bind(volume)
+	.bind(limit_price)
+	.bind(limit_quantity)
+	.bind(limit_volume)
 	.bind(Decimal::ZERO) // filled_quantity
 	.bind(Decimal::ZERO) // cancelled_quantity
+	.bind(market_price)
+	.bind(market_quantity)
+	.bind(market_volume)
+	.bind(Decimal::ZERO) // market_filled_quantity
+	.bind(Decimal::ZERO) // market_cancelled_quantity
+	.bind(Decimal::ZERO) // market_filled_volume
+	.bind(Decimal::ZERO) // market_cancelled_volume
 	.bind(common::engine_types::OrderStatus::New)
 	.bind(sqlx::types::Json(&signature_order_msg))
 	.bind(now)
@@ -698,9 +719,11 @@ pub async fn handle_order_rejected(user_id: i64, order_id: Uuid, pool: Option<sq
 	// 查询订单信息
 	let order: common::model::Orders = sqlx::query_as("SELECT * FROM orders WHERE id = $1 AND user_id = $2").bind(order_id).bind(user_id).fetch_one(tx.as_mut()).await?;
 
-	// 从订单中获取 quantity 和 volume
-	let quantity = order.quantity;
-	let volume = order.volume;
+	// 根据订单类型获取对应的 quantity 和 volume
+	let (quantity, volume) = match order.order_type {
+		common::engine_types::OrderType::Limit => (order.quantity, order.volume),
+		common::engine_types::OrderType::Market => (order.market_quantity, order.market_volume),
+	};
 
 	// 确定解冻的资产
 	let (unfreeze_token_id, unfreeze_amount) = match order.order_side {
@@ -841,15 +864,40 @@ pub async fn handle_cancel_order(user_id: i64, order_id: Uuid, cancelled_quantit
 	)
 	.await?;
 
-	// 更新订单状态为 Cancelled 并累加 cancelled_quantity，同时更新 update_id
-	let order_update_id: (i64,) =
-		sqlx::query_as("UPDATE orders SET status = $1, cancelled_quantity = cancelled_quantity + $2, updated_at = $3, update_id = update_id + 1 WHERE id = $4 RETURNING update_id")
-			.bind(common::engine_types::OrderStatus::Cancelled)
-			.bind(cancelled_quantity)
-			.bind(Utc::now())
-			.bind(order_id)
-			.fetch_one(tx.as_mut())
-			.await?;
+	// 更新订单状态为 Cancelled 并累加对应的 cancelled 字段，同时更新 update_id
+	// 根据订单类型和方向选择更新的字段
+	let order_update_id: (i64,) = match (order.order_type, order.order_side) {
+		(common::engine_types::OrderType::Market, OrderSide::Buy) => {
+			// 市价买单：更新 market_cancelled_volume
+			sqlx::query_as("UPDATE orders SET status = $1, market_cancelled_volume = market_cancelled_volume + $2, updated_at = $3, update_id = update_id + 1 WHERE id = $4 RETURNING update_id")
+				.bind(common::engine_types::OrderStatus::Cancelled)
+				.bind(volume)
+				.bind(Utc::now())
+				.bind(order_id)
+				.fetch_one(tx.as_mut())
+				.await?
+		}
+		(common::engine_types::OrderType::Market, OrderSide::Sell) => {
+			// 市价卖单：更新 market_cancelled_quantity
+			sqlx::query_as("UPDATE orders SET status = $1, market_cancelled_quantity = market_cancelled_quantity + $2, updated_at = $3, update_id = update_id + 1 WHERE id = $4 RETURNING update_id")
+				.bind(common::engine_types::OrderStatus::Cancelled)
+				.bind(cancelled_quantity)
+				.bind(Utc::now())
+				.bind(order_id)
+				.fetch_one(tx.as_mut())
+				.await?
+		}
+		(common::engine_types::OrderType::Limit, _) => {
+			// 限价单：更新 cancelled_quantity
+			sqlx::query_as("UPDATE orders SET status = $1, cancelled_quantity = cancelled_quantity + $2, updated_at = $3, update_id = update_id + 1 WHERE id = $4 RETURNING update_id")
+				.bind(common::engine_types::OrderStatus::Cancelled)
+				.bind(cancelled_quantity)
+				.bind(Utc::now())
+				.bind(order_id)
+				.fetch_one(tx.as_mut())
+				.await?
+		}
+	};
 
 	// 插入 asset_history
 	if unfreeze_token_id == USDC_TOKEN_ID {
@@ -1647,51 +1695,127 @@ pub async fn handle_trade(
 	for order_id in order_ids {
 		let filled_qty = order_filled_map.get(&order_id).unwrap_or(&Decimal::ZERO);
 
-		// 使用 FOR UPDATE 加行锁查询订单状态
-		let order_info = sqlx::query("SELECT status, filled_quantity, quantity, volume, signature_order_msg FROM orders WHERE id = $1 FOR UPDATE").bind(order_id).fetch_one(tx.as_mut()).await?;
+		// 使用 FOR UPDATE 加行锁查询订单状态（查询所有必要字段，包括市价单字段）
+		let order_info = sqlx::query(
+			"SELECT status, order_type, order_side, filled_quantity, quantity, volume,
+			        market_filled_quantity, market_filled_volume, market_quantity, market_volume,
+			        signature_order_msg
+			 FROM orders WHERE id = $1 FOR UPDATE",
+		)
+		.bind(order_id)
+		.fetch_one(tx.as_mut())
+		.await?;
 
 		let current_status: OrderStatus = order_info.try_get("status")?;
-		let current_filled_qty: Decimal = order_info.try_get("filled_quantity")?;
-		let order_quantity: Decimal = order_info.try_get("quantity")?;
+		let order_type: common::engine_types::OrderType = order_info.try_get("order_type")?;
+		let order_side: OrderSide = order_info.try_get("order_side")?;
 
 		// 获取 signature_order_msg (作为 JSONB 处理)
 		let signature_json: sqlx::types::JsonValue = order_info.try_get("signature_order_msg")?;
 		let signature_msg: SignatureOrderMsg = serde_json::from_value(signature_json)?;
 		order_signatures.insert(order_id, signature_msg);
 
-		// 计算新的 filled_quantity
-		let new_filled_qty = checked_add(current_filled_qty, *filled_qty, "new filled_quantity")?;
+		// 判断是否是taker的市价单
+		let is_taker_market_order = order_id == taker.taker_order_id && order_type == common::engine_types::OrderType::Market;
 
-		// 确定新的 status
-		let new_status = match current_status {
-			OrderStatus::Cancelled | OrderStatus::Rejected | OrderStatus::Filled => current_status,
-			_ => {
-				if new_filled_qty >= order_quantity {
-					OrderStatus::Filled
-				} else if current_status == OrderStatus::New {
-					OrderStatus::PartiallyFilled
-				} else {
-					current_status
+		// 根据订单类型计算新状态
+		let new_status = if is_taker_market_order {
+			// Taker 市价单：根据买卖方向判断状态
+			match order_side {
+				OrderSide::Buy => {
+					// 市价买单：基于 market_filled_volume 判断
+					let current_filled: Decimal = order_info.try_get("market_filled_volume")?;
+					let target: Decimal = order_info.try_get("market_volume")?;
+					let new_filled = checked_add(current_filled, taker.taker_usdc_amount, "new market_filled_volume")?;
+					match current_status {
+						OrderStatus::Cancelled | OrderStatus::Rejected | OrderStatus::Filled => current_status,
+						_ => {
+							if new_filled >= target {
+								OrderStatus::Filled
+							} else if current_status == OrderStatus::New {
+								OrderStatus::PartiallyFilled
+							} else {
+								current_status
+							}
+						}
+					}
+				}
+				OrderSide::Sell => {
+					// 市价卖单：基于 market_filled_quantity 判断
+					let current_filled: Decimal = order_info.try_get("market_filled_quantity")?;
+					let target: Decimal = order_info.try_get("market_quantity")?;
+					let new_filled = checked_add(current_filled, taker.taker_token_amount, "new market_filled_quantity")?;
+					match current_status {
+						OrderStatus::Cancelled | OrderStatus::Rejected | OrderStatus::Filled => current_status,
+						_ => {
+							if new_filled >= target {
+								OrderStatus::Filled
+							} else if current_status == OrderStatus::New {
+								OrderStatus::PartiallyFilled
+							} else {
+								current_status
+							}
+						}
+					}
+				}
+			}
+		} else {
+			// 限价单（包括 maker 订单和 taker 限价单）
+			let current_filled: Decimal = order_info.try_get("filled_quantity")?;
+			let target: Decimal = order_info.try_get("quantity")?;
+			let new_filled = checked_add(current_filled, *filled_qty, "new filled_quantity")?;
+			match current_status {
+				OrderStatus::Cancelled | OrderStatus::Rejected | OrderStatus::Filled => current_status,
+				_ => {
+					if new_filled >= target {
+						OrderStatus::Filled
+					} else if current_status == OrderStatus::New {
+						OrderStatus::PartiallyFilled
+					} else {
+						current_status
+					}
 				}
 			}
 		};
 
-		// 更新订单并获取 update_id
-		let update_id: (i64,) = sqlx::query_as(
-			"UPDATE orders
-			 SET filled_quantity = filled_quantity + $1,
-			     status = $2,
-			     updated_at = $3,
-			     update_id = update_id + 1
-			 WHERE id = $4
-			 RETURNING update_id",
-		)
-		.bind(filled_qty)
-		.bind(new_status)
-		.bind(Utc::now())
-		.bind(order_id)
-		.fetch_one(tx.as_mut())
-		.await?;
+		// 根据订单类型更新订单
+		let update_id: (i64,) = if is_taker_market_order {
+			// 市价单：同时更新 market_filled_volume 和 market_filled_quantity
+			sqlx::query_as(
+				"UPDATE orders
+				 SET market_filled_volume = market_filled_volume + $1,
+				     market_filled_quantity = market_filled_quantity + $2,
+				     status = $3,
+				     updated_at = $4,
+				     update_id = update_id + 1
+				 WHERE id = $5
+				 RETURNING update_id",
+			)
+			.bind(taker.taker_usdc_amount)
+			.bind(taker.taker_token_amount)
+			.bind(new_status)
+			.bind(Utc::now())
+			.bind(order_id)
+			.fetch_one(tx.as_mut())
+			.await?
+		} else {
+			// 限价单：只更新 filled_quantity
+			sqlx::query_as(
+				"UPDATE orders
+				 SET filled_quantity = filled_quantity + $1,
+				     status = $2,
+				     updated_at = $3,
+				     update_id = update_id + 1
+				 WHERE id = $4
+				 RETURNING update_id",
+			)
+			.bind(filled_qty)
+			.bind(new_status)
+			.bind(Utc::now())
+			.bind(order_id)
+			.fetch_one(tx.as_mut())
+			.await?
+		};
 
 		order_update_ids.insert(order_id, update_id.0);
 	}
