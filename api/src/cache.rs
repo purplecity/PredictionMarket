@@ -15,6 +15,9 @@ pub enum CacheError {
 	#[error("Event not found or closed: {0}")]
 	EventNotFoundOrClosed(i64),
 
+	#[error("Event expired: {0}")]
+	EventExpired(i64),
+
 	#[error("Market not found or closed: event_id={0}, market_id={1}")]
 	MarketNotFoundOrClosed(i64, i16),
 
@@ -31,6 +34,9 @@ static PRIVY_ID_TO_ID_CACHE: OnceCell<RwLock<HashMap<String, i64>>> = OnceCell::
 /// 全局缓存：event_id -> ApiMQEventCreate 的映射
 static EVENT_CACHE: OnceCell<RwLock<HashMap<i64, ApiMQEventCreate>>> = OnceCell::const_new();
 
+/// 全局缓存：api_key -> (user_id, privy_id) 的映射
+static API_KEY_TO_USER_INFO_CACHE: OnceCell<RwLock<HashMap<String, (i64, String)>>> = OnceCell::const_new();
+
 /// 初始化缓存
 pub fn init_cache() {
 	let privy_cache = RwLock::new(HashMap::new());
@@ -38,6 +44,9 @@ pub fn init_cache() {
 
 	let event_cache = RwLock::new(HashMap::new());
 	EVENT_CACHE.set(event_cache).expect("Event cache already initialized");
+
+	let api_key_cache = RwLock::new(HashMap::new());
+	API_KEY_TO_USER_INFO_CACHE.set(api_key_cache).expect("API key cache already initialized");
 }
 
 /// 插入 privy_id -> user_id 映射到缓存
@@ -79,6 +88,38 @@ pub async fn get_user_id_by_privy_id(privy_id: &str) -> Result<i64, CacheError> 
 	}
 }
 
+/// 根据 api_key 查询用户 id 和 privy_id
+/// 首先从缓存中查找，如果找不到则从数据库中查询
+pub async fn get_user_id_and_privy_id_by_api_key(api_key: &str) -> Result<(i64, String), CacheError> {
+	let cache = API_KEY_TO_USER_INFO_CACHE.get().ok_or(CacheError::NotInitialized)?;
+
+	// 1. 先从缓存中查找
+	{
+		let read_guard = cache.read().await;
+		if let Some((user_id, privy_id)) = read_guard.get(api_key) {
+			return Ok((*user_id, privy_id.clone()));
+		}
+	}
+
+	// 2. 缓存中没有，从数据库中查询
+	let read_pool = get_db_read_pool().map_err(|_| CacheError::NotInitialized)?;
+	let result: Option<(i64, String)> =
+		sqlx::query_as("SELECT user_id, privy_id FROM user_api_keys WHERE api_key = $1").bind(api_key).fetch_optional(&read_pool).await.map_err(CacheError::Database)?;
+
+	match result {
+		Some((user_id, privy_id)) => {
+			// 3. 查到了，插入缓存并返回
+			let mut write_guard = cache.write().await;
+			write_guard.insert(api_key.to_string(), (user_id, privy_id.clone()));
+			Ok((user_id, privy_id))
+		}
+		None => {
+			// 4. 还查不到，返回没找到错误
+			Err(CacheError::UserNotFound(format!("api_key:{}", api_key)))
+		}
+	}
+}
+
 /// 根据 event_id 查询市场信息
 /// 首先从缓存中查找，如果找不到则从数据库中查询
 pub async fn get_event(event_id: i64) -> Result<ApiMQEventCreate, CacheError> {
@@ -94,7 +135,7 @@ pub async fn get_event(event_id: i64) -> Result<ApiMQEventCreate, CacheError> {
 
 	// 2. 缓存中没有，从数据库中查询
 	let read_pool = get_db_read_pool().map_err(|_| CacheError::NotInitialized)?;
-	let event: Option<common::model::Events> = sqlx::query_as("SELECT * FROM events WHERE id = $1 AND closed = false").bind(event_id).fetch_optional(&read_pool).await.map_err(CacheError::Database)?;
+	let event: Option<common::model::Events> = sqlx::query_as("SELECT * FROM events WHERE id = $1").bind(event_id).fetch_optional(&read_pool).await.map_err(CacheError::Database)?;
 
 	match event {
 		Some(event_model) => {
@@ -119,10 +160,10 @@ pub(crate) async fn insert_event(event: ApiMQEventCreate) {
 }
 
 /// 从缓存中删除市场（内部使用）
-pub(crate) async fn remove_event(event_id: i64) {
-	let cache = EVENT_CACHE.get().expect("Event cache not initialized");
-	let mut write_guard = cache.write().await;
-	write_guard.remove(&event_id);
+pub(crate) async fn remove_event(_event_id: i64) {
+	// let cache = EVENT_CACHE.get().expect("Event cache not initialized");
+	// let mut write_guard = cache.write().await;
+	// write_guard.remove(&event_id);
 }
 
 /// 向事件中添加单个 market（内部使用）
@@ -151,20 +192,27 @@ pub async fn get_market(event_id: i64, market_id: i16) -> Result<common::event_t
 }
 
 /// 获取市场信息并检查是否关闭（用于下单等需要验证状态的场景）
-/// 直接查询数据库，检查 event.closed 和 market.closed 状态
+/// 直接查询数据库，检查 event.closed、event.end_date 和 market.closed 状态
 pub async fn get_market_and_check_closed(event_id: i64, market_id: i16) -> Result<common::event_types::ApiMQEventMarket, CacheError> {
 	let read_pool = get_db_read_pool().map_err(|_| CacheError::NotInitialized)?;
 	let market_id_str = market_id.to_string();
 
-	// 查询 event 以及对应的 market
-	let result: Option<(bool, Option<serde_json::Value>)> =
-		sqlx::query_as("SELECT closed, markets->$1::text FROM events WHERE id = $2").bind(&market_id_str).bind(event_id).fetch_optional(&read_pool).await.map_err(CacheError::Database)?;
+	// 查询 event 以及对应的 market（包含 end_date）
+	let result: Option<(bool, Option<chrono::DateTime<chrono::Utc>>, Option<serde_json::Value>)> =
+		sqlx::query_as("SELECT closed, end_date, markets->$1::text FROM events WHERE id = $2").bind(&market_id_str).bind(event_id).fetch_optional(&read_pool).await.map_err(CacheError::Database)?;
 
 	match result {
-		Some((event_closed, market_json)) => {
+		Some((event_closed, end_date, market_json)) => {
 			// 检查 event 是否关闭
 			if event_closed {
 				return Err(CacheError::EventNotFoundOrClosed(event_id));
+			}
+
+			// 检查 event 是否过期
+			if let Some(end_date) = end_date
+				&& chrono::Utc::now() >= end_date
+			{
+				return Err(CacheError::EventExpired(event_id));
 			}
 
 			// 检查 market 是否存在
@@ -233,8 +281,7 @@ pub async fn get_events(event_ids: &[i64]) -> Result<HashMap<i64, ApiMQEventCrea
 	// 2. 如果有缺失的 event_id，从数据库批量查询
 	if !missing_event_ids.is_empty() {
 		let read_pool = get_db_read_pool().map_err(|_| CacheError::NotInitialized)?;
-		let db_events: Vec<common::model::Events> =
-			sqlx::query_as("SELECT * FROM events WHERE id = ANY($1) AND closed = false").bind(&missing_event_ids).fetch_all(&read_pool).await.map_err(CacheError::Database)?;
+		let db_events: Vec<common::model::Events> = sqlx::query_as("SELECT * FROM events WHERE id = ANY($1)").bind(&missing_event_ids).fetch_all(&read_pool).await.map_err(CacheError::Database)?;
 
 		// 3. 转换为 ApiMQEventCreate 并更新缓存
 		let mut write_guard = cache.write().await;

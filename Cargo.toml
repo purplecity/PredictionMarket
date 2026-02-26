@@ -12,6 +12,7 @@ members = [
     "proto",
     "websocket_depth",
     "websocket_user",
+    "statistics",
     "tests",
     "tests/benchmark",
 ]
@@ -73,3 +74,5 @@ async_singleflight = "0.6"
 toml = "0.9"
 dotenv = "0.15"
 smallvec = "1.13"
+alloy = { version = "1", features = ["provider-http", "signer-local", "contract"] }
+url = "2"

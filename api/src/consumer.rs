@@ -86,7 +86,7 @@ pub async fn consumer_task() {
 /// 读取并处理消息
 async fn read_messages<C: redis::AsyncCommands>(conn: &mut C, last_id: &mut String) -> anyhow::Result<()> {
 	// 使用 XREAD 读取消息，每次只读取一条
-	let options = redis::streams::StreamReadOptions::default().count(1).block(0); // 一直阻塞直到收到消息
+	let options = redis::streams::StreamReadOptions::default().count(1).block(5000); // 一直阻塞直到收到消息
 	let keys = vec![API_MQ_STREAM];
 	let ids = vec![last_id.as_str()];
 	let result: redis::RedisResult<Option<redis::streams::StreamReadReply>> = conn.xread_options(&keys, &ids, &options).await;
@@ -135,8 +135,9 @@ async fn read_messages<C: redis::AsyncCommands>(conn: &mut C, last_id: &mut Stri
 			// 没有消息，继续等待
 		}
 		Err(e) => {
-			// 打印错误，继续循环
+			// 返回错误让外层重连（如 Redis 重启后 broken pipe）
 			error!("Redis XREAD error: {}", e);
+			return Err(e.into());
 		}
 	}
 

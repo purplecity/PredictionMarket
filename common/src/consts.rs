@@ -10,6 +10,7 @@ pub const ONCHAIN_MSG_CONFIG_PATH: &str = "./deploy/onchain_msg";
 pub const DEPTH_CONFIG_PATH: &str = "./deploy/depth";
 pub const WEBSOCKET_USER_CONFIG_PATH: &str = "./deploy/websocket_user";
 pub const WEBSOCKET_DEPTH_CONFIG_PATH: &str = "./deploy/websocket_depth";
+pub const STATISTICS_CONFIG_PATH: &str = "./deploy/statistics";
 
 ///jason 推送的市场创建关闭消息的stream
 pub const EVENT_MQ_STREAM: &str = "event-stream";
@@ -67,6 +68,14 @@ pub const ONCHAIN_EVENT_MSG_KEY: &str = "onchain_event_key";
 pub const USER_EVENT_STREAM: &str = "user_event_stream";
 pub const USER_EVENT_MSG_KEY: &str = "user_event_key";
 
+/// API Key 变更流 - 用于通知 websocket_user 添加/删除 API Key
+pub const API_KEY_STREAM: &str = "api_key_stream";
+pub const API_KEY_MSG_KEY: &str = "api_key_key";
+
+/// 空投注册用户USDC的stream - 用于 statistics 服务消费并批量空投
+pub const AIRDROP_STREAM: &str = "airdrop_stream";
+pub const AIRDROP_MSG_KEY: &str = "airdrop_key";
+
 /// Redis Stream 最大长度限制（使用 MAXLEN ~ 近似裁剪以提高性能）
 /// 所有 stream 统一使用 10000 作为最大长度
 pub const API_MQ_STREAM_MAXLEN: usize = 10000;
@@ -90,7 +99,7 @@ pub const SNAPSHOT_INTERVAL_SECONDS: u64 = 5;
 /// symbol切割符
 pub const SYMBOL_SEPARATOR: &str = "-*******-";
 
-/// 价格范围是[0.01,0.99] 刻度是0.0001 最多4位小数
+/// 价格范围是[0.001,0.999] 刻度是0.0001 最多4位小数
 pub const PRICE_MULTIPLIER: i32 = 10000;
 /// 数量最多2位小数
 pub const QUANTITY_MULTIPLIER: i32 = 100;
@@ -107,6 +116,18 @@ pub const ORDER_TYPE_MARKET: &str = "market";
 /// 运行模式常量
 pub const RUN_MODE_DEV: &str = "dev";
 pub const RUN_MODE_PROD: &str = "prod";
+
+/// EVM Chain ID 常量（改值即可兼容不同链）
+pub const EVM_CHAIN_ID: i32 = 56;
+pub const EVM_TESTNET_CHAIN_ID: i32 = 97;
+
+/// 根据 run_mode 获取 chain_id
+/// dev -> EVM_TESTNET_CHAIN_ID
+/// prod -> EVM_CHAIN_ID
+pub fn get_chain_id() -> i32 {
+	let run_mode = &crate::common_env::get_common_env().run_mode;
+	if run_mode == RUN_MODE_PROD { EVM_CHAIN_ID } else { EVM_TESTNET_CHAIN_ID }
+}
 
 /// Redis DB 常量 - 用于统一管理各个 Redis 连接池使用的数据库编号
 pub const REDIS_DB_COMMON_MQ: u32 = 0;
@@ -133,3 +154,22 @@ pub fn validate_run_mode(run_mode: &str) -> anyhow::Result<()> {
 		_ => Err(anyhow::anyhow!("Invalid RUN_MODE: {}. Must be either '{}' or '{}'", run_mode, RUN_MODE_DEV, RUN_MODE_PROD)),
 	}
 }
+
+// ============================================================================
+// 积分系统常量
+// ============================================================================
+
+/// 默认交易积分比例 (1% = 100/10000)
+pub const DEFAULT_TRADING_POINTS_RATIO: i32 = 100;
+
+/// 默认邀请积分比例 (5% = 5/100)
+pub const DEFAULT_INVITE_POINTS_RATIO: i32 = 5;
+
+/// 默认boost倍数 (1.1x)
+pub const DEFAULT_INVITEE_BOOST: &str = "1.1";
+
+/// 交易积分比例除数
+pub const TRADING_RATIO_DIVISOR: i64 = 10000;
+
+/// 邀请积分比例除数
+pub const INVITE_RATIO_DIVISOR: i64 = 100;

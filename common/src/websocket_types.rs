@@ -101,6 +101,16 @@ pub enum UserEvent {
 	PositionChange(PositionChangeEvent),
 }
 
+/// API Key 变更事件 - 用于通知 websocket_user 添加/删除 API Key
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum ApiKeyEvent {
+	/// 添加 API Key
+	Add { api_key: String, privy_id: String },
+	/// 删除 API Key
+	Remove { api_key: String },
+}
+
 impl UserEvent {
 	/// 获取事件对应的用户ID
 	pub fn get_privy_user_id(&self) -> &str {

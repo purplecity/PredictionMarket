@@ -50,10 +50,19 @@ pub struct CommonEnv {
 	// Asset RPC 服务 URL
 	pub asset_rpc_url: String,
 
+	// Chat Service 服务 URL
+	pub chat_service_base_url: String,
+
 	// privy设置
 	pub privy_pem_key: String,
 	pub privy_secret_key: String,
 	pub privy_app_id: String,
+
+	// EVM RPC URL（用于链上交互，如空投）
+	pub evm_rpc_url: Option<String>,
+
+	// 空投发送地址的私钥（拥有原生代币作为gas + USDC用于空投）
+	pub airdrop_private_key: Option<String>,
 }
 
 pub static COMMON_ENV: OnceCell<CommonEnv> = OnceCell::const_new();
@@ -117,6 +126,10 @@ pub fn check_common_env() -> anyhow::Result<()> {
 
 	if common_env.asset_rpc_url.is_empty() {
 		return Err(anyhow::anyhow!("Asset RPC URL is empty"));
+	}
+
+	if common_env.chat_service_base_url.is_empty() {
+		return Err(anyhow::anyhow!("Chat service base URL is empty"));
 	}
 
 	if common_env.internal_service_host.is_empty() {

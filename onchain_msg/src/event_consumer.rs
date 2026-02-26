@@ -68,7 +68,7 @@ async fn read_messages(conn: &mut impl AsyncCommands, last_id: &str) -> anyhow::
 	use redis::streams::{StreamReadOptions, StreamReadReply};
 
 	// block(0) 表示永久阻塞直到有新消息
-	let opts = StreamReadOptions::default().count(1).block(0);
+	let opts = StreamReadOptions::default().count(1).block(5000);
 
 	let result: StreamReadReply = conn.xread_options(&[ONCHAIN_EVENT_STREAM], &[last_id], &opts).await?;
 
@@ -143,13 +143,13 @@ async fn handle_market_add(market_add: common::event_types::OnchainMQMarketAdd) 
 
 	let market = &market_add.market;
 
-	// Update condition_id cache
-	condition_write.insert(market.condition_id.clone(), (market_add.event_id, market.market_id, market.token_ids.clone()));
+	// Update condition_id cache - win_outcome_token_id 在市场创建时为空，resolved 后从数据库查询获取
+	condition_write.insert(market.condition_id.clone(), (market_add.event_id, market.market_id, market.token_ids.clone(), String::new(), market.question.clone()));
 
-	// Update token_id cache with outcome_name
+	// Update token_id cache with outcome_name and question
 	for (idx, token_id) in market.token_ids.iter().enumerate() {
 		let outcome_name = market.outcomes.get(idx).cloned().unwrap_or_default();
-		token_write.insert(token_id.clone(), (market_add.event_id, market.market_id, outcome_name));
+		token_write.insert(token_id.clone(), (market_add.event_id, market.market_id, outcome_name, market.question.clone()));
 	}
 
 	info!("Updated cache for market_add: event_id={}, market_id={}", market_add.event_id, market.market_id);
@@ -158,10 +158,20 @@ async fn handle_market_add(market_add: common::event_types::OnchainMQMarketAdd) 
 }
 
 async fn handle_market_close(market_close: common::event_types::OnchainMQMarketClose) -> anyhow::Result<()> {
-	info!("Handling MarketClose: event_id={}, market_id={}, win_outcome={}", market_close.event_id, market_close.market_id, market_close.win_outcome_name);
+	info!(
+		"Handling MarketClose: event_id={}, market_id={}, condition_id={}, win_outcome_token_id={}",
+		market_close.event_id, market_close.market_id, market_close.condition_id, market_close.win_outcome_token_id
+	);
 
-	// No special action needed for market close in onchain_msg service
-	// Cache remains valid for historical lookups
+	// 更新缓存中的 win_outcome_token_id 和 question
+	let condition_cache = cache::get_condition_id_cache();
+	let mut condition_write = condition_cache.write().await;
+	condition_write.insert(
+		market_close.condition_id.clone(),
+		(market_close.event_id, market_close.market_id, market_close.token_ids.clone(), market_close.win_outcome_token_id.clone(), market_close.question.clone()),
+	);
+
+	info!("Updated condition_id cache with win_outcome_token_id: condition_id={}, win_outcome_token_id={}", market_close.condition_id, market_close.win_outcome_token_id);
 
 	Ok(())
 }

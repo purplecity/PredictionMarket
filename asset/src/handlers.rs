@@ -70,6 +70,7 @@ async fn get_or_create_position(
 	token_id: &str,
 	privy_id: Option<String>,
 	outcome_name: Option<String>,
+	question: Option<String>,
 ) -> anyhow::Result<Positions> {
 	// 先尝试获取
 	if let Some(position) = get_position_with_lock(tx, user_id, token_id).await? {
@@ -92,6 +93,7 @@ async fn get_or_create_position(
 		redeemed_timestamp: None,
 		privy_id,
 		outcome_name,
+		question,
 		update_id: 1, // 新创建的 position，update_id 为 1
 		updated_at: now,
 		created_at: now,
@@ -99,8 +101,8 @@ async fn get_or_create_position(
 
 	// 插入数据库
 	sqlx::query(
-		"INSERT INTO positions (user_id, event_id, market_id, token_id, balance, frozen_balance, usdc_cost, avg_price, redeemed, payout, redeemed_timestamp, privy_id, outcome_name, update_id, updated_at, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
+		"INSERT INTO positions (user_id, event_id, market_id, token_id, balance, frozen_balance, usdc_cost, avg_price, redeemed, payout, redeemed_timestamp, privy_id, outcome_name, question, update_id, updated_at, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)",
 	)
 	.bind(position.user_id)
 	.bind(position.event_id)
@@ -115,6 +117,7 @@ async fn get_or_create_position(
 	.bind(position.redeemed_timestamp)
 	.bind(&position.privy_id)
 	.bind(&position.outcome_name)
+	.bind(&position.question)
 	.bind(position.update_id)
 	.bind(position.updated_at)
 	.bind(position.created_at)
@@ -168,6 +171,7 @@ pub struct TradeOnchainSendParams<'a> {
 	pub taker_unfreeze_amount: Decimal,
 	pub taker_privy_user_id: &'a str,
 	pub taker_outcome_name: &'a str,
+	pub question: &'a str,
 	pub maker_infos: Vec<MakerOnchainInfo>,
 	pub tx_hash: &'a str,
 	pub success: bool,
@@ -341,6 +345,7 @@ pub async fn handle_deposit(
 	market_id: Option<i16>,
 	privy_id: Option<String>,
 	outcome_name: Option<String>,
+	question: Option<String>,
 	pool: Option<sqlx::PgPool>,
 ) -> anyhow::Result<()> {
 	let pool = match pool {
@@ -350,7 +355,7 @@ pub async fn handle_deposit(
 	let mut tx = pool.begin().await?;
 
 	// 获取或创建 Position (使用行锁)
-	let mut position = get_or_create_position(&mut tx, user_id, event_id, market_id, token_id, privy_id, outcome_name).await?;
+	let mut position = get_or_create_position(&mut tx, user_id, event_id, market_id, token_id, privy_id, outcome_name, question).await?;
 
 	// 记录变化前的状态
 	let balance_before = position.balance;
@@ -618,7 +623,7 @@ pub async fn handle_create_order(
 		}
 	};
 
-	sqlx::query(
+	let insert_result = sqlx::query(
 		"INSERT INTO orders (id, user_id, event_id, market_id, token_id, outcome, order_side, order_type, price, quantity, volume, filled_quantity, cancelled_quantity, market_price, market_quantity, market_volume, market_filled_quantity, market_cancelled_quantity, market_filled_volume, market_cancelled_volume, status, signature_order_msg, created_at, updated_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)"
 	)
@@ -647,7 +652,19 @@ pub async fn handle_create_order(
 	.bind(now)
 	.bind(now) // updated_at
 	.execute(tx.as_mut())
-	.await?;
+	.await;
+
+	// 处理插入订单错误
+	if let Err(e) = insert_result {
+		if let sqlx::Error::Database(db_err) = &e {
+			// PostgreSQL 唯一约束违反错误码为 "23505"
+			if db_err.code().map(|c| c == "23505").unwrap_or(false) {
+				anyhow::bail!("Order already exists");
+			}
+		}
+		tracing::error!("Failed to insert order: user_id={}, event_id={}, market_id={}, error={}", user_id, event_id, market_id, e);
+		anyhow::bail!("Internal error");
+	}
 
 	// 4. 插入 asset_history
 	if freeze_token_id == USDC_TOKEN_ID {
@@ -969,6 +986,7 @@ pub async fn handle_split(
 	privy_id: &str,
 	outcome_name_0: &str,
 	outcome_name_1: &str,
+	question: &str,
 	pool: Option<sqlx::PgPool>,
 ) -> anyhow::Result<()> {
 	let pool = match pool {
@@ -989,10 +1007,12 @@ pub async fn handle_split(
 			let pos = get_position_with_lock(&mut tx, user_id, token_id).await?.ok_or_else(|| anyhow::anyhow!("Position not found for token: {}", token_id))?;
 			positions.insert(token_id.to_string(), pos);
 		} else if token_id == token_0_id {
-			let pos = get_or_create_position(&mut tx, user_id, Some(event_id), Some(market_id), token_id, Some(privy_id.to_string()), Some(outcome_name_0.to_string())).await?;
+			let pos =
+				get_or_create_position(&mut tx, user_id, Some(event_id), Some(market_id), token_id, Some(privy_id.to_string()), Some(outcome_name_0.to_string()), Some(question.to_string())).await?;
 			positions.insert(token_id.to_string(), pos);
 		} else {
-			let pos = get_or_create_position(&mut tx, user_id, Some(event_id), Some(market_id), token_id, Some(privy_id.to_string()), Some(outcome_name_1.to_string())).await?;
+			let pos =
+				get_or_create_position(&mut tx, user_id, Some(event_id), Some(market_id), token_id, Some(privy_id.to_string()), Some(outcome_name_1.to_string()), Some(question.to_string())).await?;
 			positions.insert(token_id.to_string(), pos);
 		};
 	}
@@ -1195,6 +1215,7 @@ pub async fn handle_merge(
 	privy_id: &str,
 	outcome_name_0: &str,
 	outcome_name_1: &str,
+	_question: &str,
 	pool: Option<sqlx::PgPool>,
 ) -> anyhow::Result<()> {
 	let pool = match pool {
@@ -1212,7 +1233,8 @@ pub async fn handle_merge(
 	for key in keys.iter() {
 		let token_id = key.token_id.as_str();
 		if token_id == USDC_TOKEN_ID {
-			let pos = get_or_create_position(&mut tx, user_id, Some(event_id), Some(market_id), token_id, Some(privy_id.to_string()), None).await?;
+			// USDC position 不需要 question
+			let pos = get_or_create_position(&mut tx, user_id, Some(event_id), Some(market_id), token_id, Some(privy_id.to_string()), None, None).await?;
 			positions.insert(token_id.to_string(), pos);
 		} else {
 			let pos = get_position_with_lock(&mut tx, user_id, token_id).await?.ok_or_else(|| anyhow::anyhow!("Position not found for token: {}", token_id))?;
@@ -1410,6 +1432,9 @@ pub async fn handle_merge(
 }
 
 /// 处理 Redeem
+/// 根据 payout 和 win_outcome_token_id 只更新一个 token 的 position:
+/// - 如果 payout > 0: 更新 win_outcome_token_id (用户持有赢的 token)
+/// - 如果 payout == 0: 更新另一个 token (用户持有输的 token)
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_redeem(
 	user_id: i64,
@@ -1422,6 +1447,8 @@ pub async fn handle_redeem(
 	privy_id: &str,
 	outcome_name_0: &str,
 	outcome_name_1: &str,
+	win_outcome_token_id: &str,
+	question: &str,
 	pool: Option<sqlx::PgPool>,
 ) -> anyhow::Result<()> {
 	let pool = match pool {
@@ -1430,8 +1457,19 @@ pub async fn handle_redeem(
 	};
 	let mut tx = pool.begin().await?;
 
-	// 收集 LockKey 并排序
-	let mut keys = vec![LockKey::new(user_id, token_id_0.to_string()), LockKey::new(user_id, token_id_1.to_string()), LockKey::new(user_id, USDC_TOKEN_ID.to_string())];
+	// 根据 payout 确定要更新的 token_id
+	// payout > 0: 用户持有赢的 token，更新 win_outcome_token_id
+	// payout == 0: 用户持有输的 token，更新另一个 token
+	let (target_token_id, target_outcome_name) = if usdc_amount > Decimal::ZERO {
+		// 用户持有赢的 token
+		if win_outcome_token_id == token_id_0 { (token_id_0, outcome_name_0) } else { (token_id_1, outcome_name_1) }
+	} else {
+		// 用户持有输的 token
+		if win_outcome_token_id == token_id_0 { (token_id_1, outcome_name_1) } else { (token_id_0, outcome_name_0) }
+	};
+
+	// 收集 LockKey 并排序 - 只锁定需要更新的 token 和 USDC
+	let mut keys = vec![LockKey::new(user_id, target_token_id.to_string()), LockKey::new(user_id, USDC_TOKEN_ID.to_string())];
 	sort_and_dedup_lock_keys(&mut keys);
 
 	// 按排序后的顺序行锁所有资产，并存入 HashMap
@@ -1439,29 +1477,28 @@ pub async fn handle_redeem(
 	for key in keys.iter() {
 		let token_id = key.token_id.as_str();
 		let pos = if token_id == USDC_TOKEN_ID {
-			get_or_create_position(&mut tx, user_id, Some(event_id), Some(market_id), token_id, Some(privy_id.to_string()), None).await?
-		} else if token_id == token_id_0 {
-			get_or_create_position(&mut tx, user_id, Some(event_id), Some(market_id), token_id, Some(privy_id.to_string()), Some(outcome_name_0.to_string())).await?
+			// USDC position 不需要 question
+			get_or_create_position(&mut tx, user_id, Some(event_id), Some(market_id), token_id, Some(privy_id.to_string()), None, None).await?
+		} else if token_id == target_token_id {
+			get_or_create_position(&mut tx, user_id, Some(event_id), Some(market_id), token_id, Some(privy_id.to_string()), Some(target_outcome_name.to_string()), Some(question.to_string())).await?
 		} else {
-			get_or_create_position(&mut tx, user_id, Some(event_id), Some(market_id), token_id, Some(privy_id.to_string()), Some(outcome_name_1.to_string())).await?
+			// 不是 USDC 也不是 target_token_id，跳过
+			continue;
 		};
 		positions.insert(token_id.to_string(), pos);
 	}
 
 	// 从 HashMap 获取各个 position
-	let token_0_pos = positions.get(token_id_0).ok_or_else(|| anyhow::anyhow!("Token_0 position not found"))?.clone();
-	let token_1_pos = positions.get(token_id_1).ok_or_else(|| anyhow::anyhow!("Token_1 position not found"))?.clone();
+	let target_token_pos = positions.get(target_token_id).ok_or_else(|| anyhow::anyhow!("Target token position not found"))?.clone();
 	let usdc_pos = positions.get(USDC_TOKEN_ID).ok_or_else(|| anyhow::anyhow!("USDC position not found"))?.clone();
 
 	// 收集 update_id
-	let mut token_0_update_id = 0i64;
-	let mut token_1_update_id = 0i64;
+	let mut target_token_update_id = 0i64;
 
-	// 按照 keys 的排序顺序更新 token position
+	// 按照 keys 的排序顺序更新 position
 	for key in keys.iter() {
 		let token_id = key.token_id.as_str();
 		if token_id == USDC_TOKEN_ID {
-			// USDC 稍后处理
 			// 如果 usdc_amount > 0，更新 USDC position 并插入 asset_history
 			if usdc_amount > Decimal::ZERO {
 				let usdc_balance_before = usdc_pos.balance;
@@ -1506,36 +1543,18 @@ pub async fn handle_redeem(
 				)
 				.await?;
 			}
-		} else if token_id == token_id_0 {
-			// Token_0: 只更新 redeemed、payout 和 redeemed_timestamp，其他字段保持不变
+		} else if token_id == target_token_id {
+			// 只更新目标 token 的 redeemed、payout 和 redeemed_timestamp
 			let now = Utc::now();
-			token_0_update_id = update_position(
+			target_token_update_id = update_position(
 				&mut tx,
 				PositionUpdate {
 					user_id,
-					token_id: token_id_0,
-					balance: token_0_pos.balance,
-					frozen_balance: token_0_pos.frozen_balance,
-					usdc_cost: token_0_pos.usdc_cost,
-					avg_price: token_0_pos.avg_price,
-					redeemed: Some(true),
-					payout: Some(usdc_amount),
-					redeemed_timestamp: Some(now),
-				},
-			)
-			.await?;
-		} else if token_id == token_id_1 {
-			// Token_1: 只更新 redeemed、payout 和 redeemed_timestamp，其他字段保持不变
-			let now = Utc::now();
-			token_1_update_id = update_position(
-				&mut tx,
-				PositionUpdate {
-					user_id,
-					token_id: token_id_1,
-					balance: token_1_pos.balance,
-					frozen_balance: token_1_pos.frozen_balance,
-					usdc_cost: token_1_pos.usdc_cost,
-					avg_price: token_1_pos.avg_price,
+					token_id: target_token_id,
+					balance: target_token_pos.balance,
+					frozen_balance: target_token_pos.frozen_balance,
+					usdc_cost: target_token_pos.usdc_cost,
+					avg_price: target_token_pos.avg_price,
 					redeemed: Some(true),
 					payout: Some(usdc_amount),
 					redeemed_timestamp: Some(now),
@@ -1551,17 +1570,12 @@ pub async fn handle_redeem(
 
 	tx.commit().await?;
 
-	info!("handle_redeem success: user_id={}, token_0_id={}, token_1_id={}, usdc_amount={}, tx_hash={}", user_id, token_id_0, token_id_1, usdc_amount, tx_hash);
+	info!("handle_redeem success: user_id={}, target_token_id={}, usdc_amount={}, win_outcome_token_id={}, tx_hash={}", user_id, target_token_id, usdc_amount, win_outcome_token_id, tx_hash);
 
-	// Websocket push for position changes - redeem closes both positions
-	// Send PositionRemoved for both tokens since they are redeemed
-	let token_0_total = token_0_pos.balance + token_0_pos.frozen_balance;
-	let token_1_total = token_1_pos.balance + token_1_pos.frozen_balance;
-	if token_0_total > Decimal::ZERO {
-		crate::user_event::send_position_removed(privy_id.to_string(), event_id, market_id, token_id_0.to_string(), token_0_update_id);
-	}
-	if token_1_total > Decimal::ZERO {
-		crate::user_event::send_position_removed(privy_id.to_string(), event_id, market_id, token_id_1.to_string(), token_1_update_id);
+	// Websocket push for position changes - only send for the redeemed token
+	let target_token_total = target_token_pos.balance + target_token_pos.frozen_balance;
+	if target_token_total > Decimal::ZERO {
+		crate::user_event::send_position_removed(privy_id.to_string(), event_id, market_id, target_token_id.to_string(), target_token_update_id);
 	}
 
 	Ok(())
@@ -1864,6 +1878,7 @@ pub async fn handle_trade_onchain_send_result(params: TradeOnchainSendParams<'_>
 		taker_unfreeze_amount,
 		taker_privy_user_id,
 		taker_outcome_name,
+		question,
 		maker_infos,
 		tx_hash,
 		success,
@@ -1949,8 +1964,10 @@ pub async fn handle_trade_onchain_send_result(params: TradeOnchainSendParams<'_>
 		// 从映射中获取 privy_id 和 outcome_name
 		let privy_id_opt = user_privy_map.get(&user_id).map(|s| s.to_string());
 		let outcome_name_opt = token_outcome_map.get(token_id).map(|s| s.to_string());
+		// USDC position 不需要 question
+		let question_opt = if token_id == USDC_TOKEN_ID { None } else { Some(question.to_string()) };
 
-		let pos = get_or_create_position(&mut tx, user_id, Some(event_id), Some(market_id), token_id, privy_id_opt, outcome_name_opt).await?;
+		let pos = get_or_create_position(&mut tx, user_id, Some(event_id), Some(market_id), token_id, privy_id_opt, outcome_name_opt, question_opt).await?;
 		positions_map.insert((user_id, token_id.to_string()), pos);
 	}
 

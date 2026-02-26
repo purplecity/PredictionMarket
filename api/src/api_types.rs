@@ -2,6 +2,7 @@ use {
 	common::engine_types::{OrderSide, OrderStatus, OrderType},
 	rust_decimal::Decimal,
 	serde::{Deserialize, Serialize},
+	sqlx::FromRow,
 	std::str::FromStr,
 };
 
@@ -128,7 +129,7 @@ impl PlaceOrderRequest {
 	/*
 	校验请求参数,当前的约定是
 	makerAmout永远最多2位小数.
-	price区间是[0.01,0.99]最多4位小数
+	price区间是[0.001,0.999]最多4位小数
 	然后takerAmount如果是买的话 = makerAmount/price 然后直接截断2位
 	如果是卖的话takerAmount=price*makerAmount 不用截断
 	*/
@@ -145,10 +146,10 @@ impl PlaceOrderRequest {
 
 		// 3. 校验 price
 		let price = Decimal::from_str(&self.price).map_err(|e| format!("Invalid price: {}", e))?;
-		let min_price = Decimal::new(1, 2); // 0.01
-		let max_price = Decimal::new(99, 2); // 0.99
+		let min_price = Decimal::new(1, 3); // 0.001
+		let max_price = Decimal::new(999, 3); // 0.999
 		if price < min_price || price > max_price {
-			return Err(format!("price must be between 0.01 and 0.99, got {}", price));
+			return Err(format!("price must be between 0.001 and 0.999, got {}", price));
 		}
 		// 最多4位小数
 		if price.scale() > 4 {
@@ -227,10 +228,29 @@ pub struct CancelOrderRequest {
 /// 取消订单响应
 pub type CancelOrderResponse = ApiResponse<()>;
 
+/// 余额查询请求
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BalanceRequest {
+	pub uid: i64,
+}
+
+/// 余额查询响应
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BalanceResponse {
+	#[serde(with = "rust_decimal::serde::str")]
+	pub balance: Decimal,
+}
+
 /// 取消所有订单响应
 pub type CancelAllOrdersResponse = ApiResponse<()>;
 
 // ============ Query Types (from api_query) ============
+
+/// 用户数据请求（可选邀请码参数）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserDataRequest {
+	pub invite_code: Option<String>,
+}
 
 /// 用户数据响应（只返回需要的字段）
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -250,13 +270,15 @@ pub struct UserDataResponse {
 	pub bio: String,
 	#[serde(rename = "profile_image")]
 	pub profile_image: String,
+	#[serde(rename = "invite_code")]
+	pub invite_code: String,
 }
 
 impl From<common::model::Users> for UserDataResponse {
 	fn from(user: common::model::Users) -> Self {
 		Self {
 			id: user.id,
-			privy_id: user.privy_id,
+			privy_id: user.privy_id.clone(),
 			privy_evm_address: user.privy_evm_address.clone(),
 			privy_email: user.privy_email,
 			privy_x: user.privy_x,
@@ -264,8 +286,113 @@ impl From<common::model::Users> for UserDataResponse {
 			name: if user.name.is_empty() { user.privy_evm_address } else { user.name },
 			bio: user.bio,
 			profile_image: user.profile_image,
+			invite_code: user.privy_id, // 邀请码即 privy_id
 		}
 	}
+}
+
+/// 邀请统计响应
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InviteStatsResponse {
+	/// 邀请获得积分比例 (除以100)，如5表示5%
+	pub invite_points_ratio: i32,
+	/// 被邀请人boost倍数，如"1.50"表示1.5倍
+	pub invitee_boost: String,
+	/// 本赛季邀请获得积分
+	pub invite_earned_points: i64,
+	/// 被邀请人总交易量
+	pub invitees_total_volume: String,
+	/// 邀请人数
+	pub invite_count: i64,
+}
+
+/// 积分排行榜响应
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LeaderboardPointsResponse {
+	pub leaderboard: Vec<LeaderboardPointsItem>,
+	/// 当前用户排名，">200" 表示超过200名
+	pub my_rank: Option<String>,
+	/// 当前用户总积分
+	pub my_total_points: Option<i64>,
+}
+
+/// 积分排行榜项目
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LeaderboardPointsItem {
+	pub rank: i32,
+	pub user_id: i64,
+	pub name: String,
+	pub profile_image: String,
+	pub total_points: i64,
+}
+
+/// 交易量排行榜响应
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LeaderboardVolumeResponse {
+	pub leaderboard: Vec<LeaderboardVolumeItem>,
+	/// 当前用户排名，">200" 表示超过200名
+	pub my_rank: Option<String>,
+	/// 当前用户累积交易量
+	pub my_accumulated_volume: Option<String>,
+}
+
+/// 交易量排行榜项目
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LeaderboardVolumeItem {
+	pub rank: i32,
+	pub user_id: i64,
+	pub name: String,
+	pub profile_image: String,
+	pub accumulated_volume: String,
+}
+
+/// 排行榜请求参数
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LeaderboardRequest {
+	/// 可选的赛季ID，不传则查询当前赛季
+	pub season_id: Option<i32>,
+}
+
+/// 当前赛季信息响应
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CurrentSeasonResponse {
+	pub season_id: i32,
+	pub name: String,
+	/// 开始时间戳（秒）
+	pub start_time: i64,
+	/// 结束时间戳（秒）
+	pub end_time: i64,
+}
+
+/// 赛季列表项
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SeasonItem {
+	pub season_id: i32,
+	/// 开始时间戳（秒）
+	pub start_time: i64,
+	/// 结束时间戳（秒）
+	pub end_time: i64,
+}
+
+/// 所有赛季列表响应
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SeasonsListResponse {
+	pub seasons: Vec<SeasonItem>,
+}
+
+/// 单条邀请记录
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InviteRecordItem {
+	pub user_id: i64,
+	pub name: String,
+	pub profile_image: String,
+	pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// 邀请记录列表响应
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InviteRecordsResponse {
+	pub records: Vec<InviteRecordItem>,
 }
 
 /// 获取图片签名URL请求
@@ -298,6 +425,7 @@ pub struct EventsRequest {
 	pub ending_soon: Option<bool>,
 	pub newest: Option<bool>,
 	pub topic: Option<String>,
+	pub title: Option<String>,
 	pub volume: Option<bool>,
 	pub page: i16,
 	pub page_size: i16,
@@ -320,6 +448,7 @@ pub struct SingleEventResponse {
 	pub volume: Decimal,
 	pub topic: String,
 	pub markets: Vec<EventMarketResponse>,
+	pub has_streamer: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -333,6 +462,10 @@ pub struct EventMarketResponse {
 	pub outcome_1_token_id: String,
 	pub outcome_0_chance: String,
 	pub outcome_1_chance: String,
+	pub outcome_0_best_bid: String,
+	pub outcome_0_best_ask: String,
+	pub outcome_1_best_bid: String,
+	pub outcome_1_best_ask: String,
 }
 
 // 市场详情请求和响应
@@ -388,12 +521,169 @@ pub struct EventMarketDetail {
 	pub winner_outcome_token_id: String,
 }
 
+// Event Streamers 接口请求和响应
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventStreamersRequest {
+	pub event_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventStreamersResponse {
+	pub streamers: Vec<StreamerWithViewerCount>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamerWithViewerCount {
+	pub streamer_uid: String,
+	pub viewer_count: i32,
+	pub live_room: LiveRoomRow,
+	pub user: Option<StreamerUserInfo>,
+}
+
+/// Streamer 用户信息（简化版，只包含必要字段）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamerUserInfo {
+	pub privy_id: String,
+	pub name: String,
+	pub profile_image: String,
+}
+
+impl StreamerUserInfo {
+	/// 从 Users 模型转换为 StreamerUserInfo
+	pub fn from_user(user: &common::model::Users) -> Self {
+		Self { privy_id: user.privy_id.clone(), name: user.name.clone(), profile_image: user.profile_image.clone() }
+	}
+}
+
+// Streamer Viewer Count 接口请求和响应
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamerViewerCountRequest {
+	pub streamer_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamerViewerCountResponse {
+	pub viewer_count: i32,
+}
+
+/// 用户信息（来自 Users 表）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserInfo {
+	pub id: i64,
+	pub privy_id: String,
+	pub privy_evm_address: String,
+	pub privy_email: String,
+	pub privy_x: String,
+	pub privy_x_image: String,
+	pub name: String,
+	pub bio: String,
+	pub profile_image: String,
+	pub last_login_ip: String,
+	pub last_login_region: String,
+	pub last_login_at: i64,
+	pub registered_ip: String,
+	pub registered_region: String,
+	pub created_at: i64,
+}
+
+impl UserInfo {
+	/// 从 Users 模型转换为 UserInfo
+	pub fn from_user(user: &common::model::Users) -> Self {
+		Self {
+			id: user.id,
+			privy_id: user.privy_id.clone(),
+			privy_evm_address: user.privy_evm_address.clone(),
+			privy_email: user.privy_email.clone(),
+			privy_x: user.privy_x.clone(),
+			privy_x_image: user.privy_x_image.clone(),
+			name: user.name.clone(),
+			bio: user.bio.clone(),
+			profile_image: user.profile_image.clone(),
+			last_login_ip: user.last_login_ip.clone(),
+			last_login_region: user.last_login_region.clone(),
+			last_login_at: user.last_login_at.timestamp(),
+			registered_ip: user.registered_ip.clone(),
+			registered_region: user.registered_region.clone(),
+			created_at: user.created_at.timestamp(),
+		}
+	}
+}
+
+// Lives 接口请求和响应
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LivesRequest {
+	pub ending_soon: Option<bool>,
+	pub newest: Option<bool>,
+	pub topic: Option<String>,
+	pub volume: Option<bool>,
+	pub page: i16,
+	pub page_size: i16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LivesResponse {
+	pub streamers: Vec<StreamerEventResponse>,
+	pub total: i16,
+	pub has_more: bool,
+}
+
+/// Streamer 和对应的 Event 信息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamerEventResponse {
+	pub streamer_uid: String,
+	pub live_room: LiveRoomRow,
+	pub user: Option<StreamerUserInfo>,
+	pub event: SingleEventResponse,
+}
+
+/// PostgreSQL live_rooms 表的行结构
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct LiveRoomRow {
+	pub id: String,
+	pub room_id: Option<String>,
+	pub room_name: Option<String>,
+	pub room_desc: Option<String>,
+	pub status: Option<String>,
+	pub event_id: Option<String>,
+	#[serde(with = "chrono::serde::ts_milliseconds_option")]
+	pub create_date: Option<chrono::DateTime<chrono::Utc>>,
+	pub picture_url: Option<String>,
+	#[serde(with = "chrono::serde::ts_milliseconds_option")]
+	pub created_at: Option<chrono::DateTime<chrono::Utc>>,
+	#[serde(with = "chrono::serde::ts_milliseconds_option")]
+	pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+// Streamer Detail 接口请求和响应
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamerDetailRequest {
+	pub streamer_uid: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamerDetailResponse {
+	pub streamer_uid: String,
+	pub live_room: Option<LiveRoomRow>,
+	pub user: Option<StreamerUserInfo>,
+	pub event: Option<SingleEventResponse>,
+}
+
+/// 投资组合价值请求
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioValueRequest {
+	pub uid: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortfolioValueResponse {
 	#[serde(with = "rust_decimal::serde::str")]
 	pub value: Decimal,
-	#[serde(with = "rust_decimal::serde::str")]
-	pub cash: Decimal,
+}
+
+/// 交易量请求
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TradedVolumeRequest {
+	pub uid: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -413,8 +703,10 @@ pub struct TradedVolumeResponse {
 // 持仓请求和响应
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PositionRequest {
+	pub uid: i64,
 	pub event_id: Option<i64>,
 	pub market_id: Option<i16>,
+	pub question: Option<String>,
 	pub value: Option<bool>,
 	pub quantity: Option<bool>,
 	pub avg_price: Option<bool>,
@@ -440,6 +732,7 @@ pub struct SinglePositionResponse {
 	pub event_image: String,
 	pub market_image: String,
 	pub outcome_name: String,
+	pub condition_id: String,
 	pub token_id: String,
 	#[serde(with = "rust_decimal::serde::str")]
 	pub avg_price: Decimal,
@@ -458,8 +751,10 @@ pub struct SinglePositionResponse {
 // 已平仓请求和响应
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClosedPositionsRequest {
+	pub uid: i64,
 	pub event_id: Option<i64>,
 	pub market_id: Option<i16>,
+	pub question: Option<String>,
 	pub avg_price: Option<bool>,
 	pub profit_value: Option<bool>,
 	pub profit_percentage: Option<bool>,
@@ -505,6 +800,7 @@ pub struct SingleClosedPositionResponse {
 // 活动请求和响应
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActivityRequest {
+	pub uid: i64,
 	pub event_id: Option<i64>,
 	pub market_id: Option<i16>,
 	pub page: i16,
@@ -534,6 +830,8 @@ pub struct SingleActivityResponse {
 	pub price: Option<Decimal>,
 	#[serde(with = "rust_decimal::serde::str")]
 	pub quantity: Decimal,
+	#[serde(with = "rust_decimal::serde::str")]
+	pub value: Decimal,
 	pub tx_hash: String,
 }
 
@@ -541,6 +839,7 @@ pub struct SingleActivityResponse {
 // 未成交订单请求和响应
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenOrdersRequest {
+	pub uid: i64,
 	pub event_id: Option<i64>,
 	pub market_id: Option<i16>,
 	pub page: i16,
@@ -653,4 +952,47 @@ pub struct SingleOrderHistoryResponse {
 	pub status: OrderStatus,     //订单状态
 	pub created_at: i64,         //创建时间
 	pub updated_at: i64,         //更新时间
+}
+
+/// 用户积分查询请求
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PointsRequest {
+	pub uid: i64,
+}
+
+/// 用户积分查询响应
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PointsResponse {
+	pub boost_points: i64,
+	pub invite_points: i64,
+	pub total_points: i64,
+	/// 排名，前200名显示具体名次，否则为 ">200"
+	pub rank: String,
+}
+
+/// 用户简单信息查询请求
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimpleInfoRequest {
+	pub uid: i64,
+}
+
+/// 用户简单信息查询响应
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimpleInfoResponse {
+	pub name: String,
+	pub profile_image: String,
+}
+
+/// 用户赛季积分交易量查询请求
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserPointsVolumesRequest {
+	pub season_id: Option<i32>,
+}
+
+/// 用户赛季积分交易量查询响应
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserPointsVolumesResponse {
+	pub total_points: i64,
+	#[serde(with = "rust_decimal::serde::str")]
+	pub accumulated_volume: Decimal,
 }

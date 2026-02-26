@@ -47,10 +47,11 @@ impl AssetService for AssetServiceImpl {
 		// 对于 USDC，event_id 和 market_id 应该为 None
 		let (event_id, market_id) = if req.token_id == USDC_TOKEN_ID { (None, None) } else { (Some(req.event_id), Some(market_id)) };
 
-		// 调用 handler (privy_id, outcome_name 用于创建position时使用)
+		// 调用 handler (privy_id, outcome_name, question 用于创建position时使用)
 		let privy_id = if req.privy_id.is_empty() { None } else { Some(req.privy_id.clone()) };
 		let outcome_name = if req.outcome_name.is_empty() { None } else { Some(req.outcome_name.clone()) };
-		match handlers::handle_deposit(req.user_id, &req.token_id, amount, &req.tx_hash, event_id, market_id, privy_id, outcome_name, None).await {
+		let question = if req.question.is_empty() { None } else { Some(req.question.clone()) };
+		match handlers::handle_deposit(req.user_id, &req.token_id, amount, &req.tx_hash, event_id, market_id, privy_id, outcome_name, question, None).await {
 			Ok(_) => Ok(Response::new(proto::Response { success: true, reason: String::new() })),
 			Err(e) => {
 				error!("Deposit failed: user_id={}, token_id={}, amount={}, error={}", req.user_id, req.token_id, req.amount, e);
@@ -211,6 +212,7 @@ impl AssetService for AssetServiceImpl {
 			&req.privy_id,
 			&req.outcome_name_0,
 			&req.outcome_name_1,
+			&req.question,
 			None,
 		)
 		.await
@@ -250,6 +252,7 @@ impl AssetService for AssetServiceImpl {
 			&req.privy_id,
 			&req.outcome_name_0,
 			&req.outcome_name_1,
+			&req.question,
 			None,
 		)
 		.await
@@ -285,6 +288,8 @@ impl AssetService for AssetServiceImpl {
 			&req.privy_id,
 			&req.outcome_name_0,
 			&req.outcome_name_1,
+			&req.win_outcome_token_id,
+			&req.question,
 			None,
 		)
 		.await
@@ -448,6 +453,7 @@ impl AssetService for AssetServiceImpl {
 			taker_unfreeze_amount,
 			taker_privy_user_id: &taker_info.taker_privy_user_id,
 			taker_outcome_name: &taker_info.taker_outcome_name,
+			question: &taker_info.question,
 			maker_infos,
 			tx_hash: &req.tx_hash,
 			success: req.success,

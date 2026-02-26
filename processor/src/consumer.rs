@@ -200,7 +200,7 @@ async fn consumer_task(group_name: String, consumer_id: String, batch_size: usiz
 /// 读取并处理消息
 async fn read_processor_messages<C: redis::AsyncCommands>(conn: &mut C, group_name: &str, consumer_id: &str, batch_size: usize) -> anyhow::Result<()> {
 	// 使用 XREADGROUP 读取消息
-	let options = redis::streams::StreamReadOptions::default().group(group_name, consumer_id).count(batch_size).block(1000); // 阻塞1秒
+	let options = redis::streams::StreamReadOptions::default().group(group_name, consumer_id).count(batch_size).block(5000); // 阻塞1秒
 	let keys = vec![PROCESSOR_STREAM];
 	let ids = vec![">"];
 	let result: redis::RedisResult<Option<redis::streams::StreamReadReply>> = conn.xread_options(&keys, &ids, &options).await;
@@ -254,6 +254,7 @@ async fn read_processor_messages<C: redis::AsyncCommands>(conn: &mut C, group_na
 			// 没有消息，继续等待
 		}
 		Err(e) => {
+			// 返回错误让外层重连（如 Redis 重启后 broken pipe）
 			return Err(anyhow::anyhow!("Redis XREADGROUP error: {}", e));
 		}
 	}

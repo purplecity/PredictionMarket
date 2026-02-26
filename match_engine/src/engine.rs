@@ -773,7 +773,7 @@ impl MatchEngine {
 		}
 
 		// 价格范围验证
-		if !(100..=9900).contains(&order_msg.price) {
+		if !(10..=9990).contains(&order_msg.price) {
 			return false;
 		}
 

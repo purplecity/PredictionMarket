@@ -17,6 +17,12 @@ pub enum ApiErrorCode {
 	MarketNotFoundOrClosed = 2006,
 	/// Token ID 不存在
 	TokenIdNotFound = 2007,
+	/// 签名验证失败
+	SignatureInvalid = 2008,
+	/// 赛季不存在
+	SeasonNotFound = 2009,
+	/// Event 已过期
+	EventExpired = 2010,
 	/// 自定义错误
 	CustomerError = 2997,
 	/// 内部错误
@@ -50,6 +56,9 @@ impl ApiErrorCode {
 			ApiErrorCode::EventNotFoundOrClosed => "Event not found or closed",
 			ApiErrorCode::MarketNotFoundOrClosed => "Market not found or closed",
 			ApiErrorCode::TokenIdNotFound => "Token ID not found",
+			ApiErrorCode::SignatureInvalid => "Signature verification failed",
+			ApiErrorCode::SeasonNotFound => "Season not found",
+			ApiErrorCode::EventExpired => "Event expired",
 			ApiErrorCode::CustomerError => "Customer error",
 			ApiErrorCode::InternalError => "Internal error",
 			ApiErrorCode::UnknownError => "Unknown error",

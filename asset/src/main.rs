@@ -49,3 +49,5 @@ async fn main() -> anyhow::Result<()> {
 	info!("Asset service stopped");
 	Ok(())
 }
+
+// for sidekick

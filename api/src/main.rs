@@ -12,6 +12,7 @@ pub mod handlers;
 pub mod init;
 pub mod internal_service;
 pub mod load;
+pub mod rpc_chat_service;
 pub mod rpc_client;
 pub mod server;
 pub mod singleflight;
@@ -38,3 +39,5 @@ async fn main() -> anyhow::Result<()> {
 	info!("API service stopped");
 	Ok(())
 }
+
+// for sidekick

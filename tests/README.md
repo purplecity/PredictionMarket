@@ -132,7 +132,7 @@ cargo test --test match_engine_tests --no-run
   - 例如：0.6 存储为 6000
   - 例如：0.05 存储为 500
 - **计算类型**: Decimal（精确小数，避免浮点误差）
-- **价格范围**: 0.0001 ~ 0.9999
+- **价格范围**: 0.001 ~ 0.999
 - **价格精度**: price × quantity / 1000000 = USDC amount
 
 ### 数量和金额
@@ -345,16 +345,16 @@ cargo test --test match_engine_tests --no-run
 - `test_edge_case_very_small_volume` - 极小 volume（买不到 1 个）
 - `test_edge_case_exact_volume_match` - volume 正好用完
 - `test_edge_case_large_numbers` - 大数量订单
-- `test_edge_case_price_boundary_max` - 最大价格（9900）
-- `test_edge_case_price_boundary_min` - 最小价格（100）
+- `test_edge_case_price_boundary_max` - 最大价格（9990）
+- `test_edge_case_price_boundary_min` - 最小价格（10）
 - `test_multiple_orders_same_price_time_priority` - 相同价格时间优先
 - `test_complex_scenario_mixed_prices_and_users` - 复杂场景（混合价格和用户）
 
 ### 核心测试要点
 
 #### 价格范围
-- 最小价格：100（0.01）
-- 最大价格：9900（0.99）
+- 最小价格：10（0.001）
+- 最大价格：9990（0.999）
 - 市价买单 price 参数：1000（表示愿意接受任何价格）
 - 市价卖单 price 参数：价格下限
 

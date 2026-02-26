@@ -48,7 +48,7 @@ async fn test_create_buy_order() {
 	// 先存入 USDC（用于买单）
 	let usdc_amount = parse_decimal("1000.00");
 	let deposit_tx_hash = uuid::Uuid::new_v4().to_string();
-	asset::handlers::handle_deposit(user_id, USDC_TOKEN_ID, usdc_amount, &deposit_tx_hash, None, None, Some(privy_id.clone()), None, Some(env.pool.clone()))
+	asset::handlers::handle_deposit(user_id, USDC_TOKEN_ID, usdc_amount, &deposit_tx_hash, None, None, Some(privy_id.clone()), None, None, Some(env.pool.clone()))
 		.await
 		.expect("USDC deposit should succeed");
 
@@ -93,9 +93,20 @@ async fn test_create_sell_order() {
 	// 先存入 Token（用于卖单）
 	let token_amount = parse_decimal("100.0");
 	let deposit_tx_hash = uuid::Uuid::new_v4().to_string();
-	asset::handlers::handle_deposit(user_id, &token_0_id, token_amount, &deposit_tx_hash, Some(event_id), Some(market_id), Some(privy_id.clone()), Some("Yes".to_string()), Some(env.pool.clone()))
-		.await
-		.expect("Token deposit should succeed");
+	asset::handlers::handle_deposit(
+		user_id,
+		&token_0_id,
+		token_amount,
+		&deposit_tx_hash,
+		Some(event_id),
+		Some(market_id),
+		Some(privy_id.clone()),
+		Some("Yes".to_string()),
+		None,
+		Some(env.pool.clone()),
+	)
+	.await
+	.expect("Token deposit should succeed");
 
 	// 创建卖单参数
 	let price = parse_decimal("0.4");
@@ -138,7 +149,7 @@ async fn test_create_order_insufficient_balance() {
 	// 只存入少量 USDC
 	let usdc_amount = parse_decimal("10.00");
 	let deposit_tx_hash = uuid::Uuid::new_v4().to_string();
-	asset::handlers::handle_deposit(user_id, USDC_TOKEN_ID, usdc_amount, &deposit_tx_hash, None, None, Some(privy_id.clone()), None, Some(env.pool.clone()))
+	asset::handlers::handle_deposit(user_id, USDC_TOKEN_ID, usdc_amount, &deposit_tx_hash, None, None, Some(privy_id.clone()), None, None, Some(env.pool.clone()))
 		.await
 		.expect("USDC deposit should succeed");
 
@@ -181,7 +192,7 @@ async fn test_create_multiple_orders() {
 	// 存入足够的 USDC
 	let usdc_amount = parse_decimal("1000.00");
 	let deposit_tx_hash = uuid::Uuid::new_v4().to_string();
-	asset::handlers::handle_deposit(user_id, USDC_TOKEN_ID, usdc_amount, &deposit_tx_hash, None, None, Some(privy_id.clone()), None, Some(env.pool.clone()))
+	asset::handlers::handle_deposit(user_id, USDC_TOKEN_ID, usdc_amount, &deposit_tx_hash, None, None, Some(privy_id.clone()), None, None, Some(env.pool.clone()))
 		.await
 		.expect("USDC deposit should succeed");
 

@@ -1,7 +1,7 @@
 use {
 	crate::{
 		consts::{HEARTBEAT_CHECK_INTERVAL_SECS, HEARTBEAT_TIMEOUT_SECS},
-		storage::UserStorage,
+		storage::{ApiKeyStorage, UserStorage},
 	},
 	axum::{
 		extract::{
@@ -30,16 +30,23 @@ struct AuthResponse {
 	success: bool,
 }
 
-/// 鉴权消息格式
+/// JWT 鉴权消息格式
 #[derive(Debug, Deserialize)]
 struct AuthMessage {
 	auth: String,
+}
+
+/// API Key 鉴权消息格式
+#[derive(Debug, Deserialize)]
+struct ApiKeyAuthMessage {
+	api_key: String,
 }
 
 /// 应用状态
 #[derive(Clone)]
 pub struct AppState {
 	pub storage: Arc<RwLock<UserStorage>>,
+	pub api_key_storage: Arc<RwLock<ApiKeyStorage>>,
 }
 
 /// WebSocket升级处理
@@ -131,43 +138,56 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
 								// 处理JSON消息
 								if !authenticated {
-									// 未鉴权状态，只接受鉴权消息
-									match serde_json::from_str::<AuthMessage>(&text_str) {
-										Ok(auth_msg) => {
-											// 验证JWT token
-											match common::privy_jwt::check_privy_jwt(&auth_msg.auth, &pem_key, &app_id) {
-												Ok(user_id) => {
-													authenticated = true;
-													privy_id = Some(user_id.clone());
-													last_heartbeat = tokio::time::Instant::now();
-
-													// 注册连接到storage
-													state.storage.write().await.register_connection(
-														user_id.clone(),
-														conn_id.clone(),
-														tx.clone(),
-													);
-
-													info!("Connection {} authenticated as user {}", conn_id, user_id);
-
-													// 发送鉴权成功响应
-													let response = AuthResponse { event_type: "auth", success: true };
-													if ws_sender.send(Message::Text(serde_json::to_string(&response).expect("serialize auth response").into())).await.is_err() {
-														break;
-													}
-												}
-												Err(e) => {
-													warn!("Connection {} auth failed: {}", conn_id, e);
-													// 发送鉴权失败响应并断开连接
-													let response = AuthResponse { event_type: "auth", success: false };
-													let _ = ws_sender.send(Message::Text(serde_json::to_string(&response).expect("serialize auth response").into())).await;
-													break;
-												}
+									// 未鉴权状态，尝试解析为 JWT 鉴权消息或 API Key 鉴权消息
+									let auth_result = if let Ok(auth_msg) = serde_json::from_str::<AuthMessage>(&text_str) {
+										// 尝试 JWT 验证
+										match common::privy_jwt::check_privy_jwt(&auth_msg.auth, &pem_key, &app_id) {
+											Ok(user_id) => Some(user_id),
+											Err(e) => {
+												warn!("Connection {} JWT auth failed: {}", conn_id, e);
+												None
 											}
 										}
-										Err(_) => {
-											// 第一条消息不是鉴权消息，断开连接
-											warn!("Connection {} first message is not auth message, disconnecting", conn_id);
+									} else if let Ok(api_key_msg) = serde_json::from_str::<ApiKeyAuthMessage>(&text_str) {
+										// 尝试 API Key 验证
+										let api_key_storage = state.api_key_storage.read().await;
+										if let Some(user_id) = api_key_storage.get_privy_id(&api_key_msg.api_key) {
+											Some(user_id.clone())
+										} else {
+											warn!("Connection {} API Key auth failed: invalid api_key", conn_id);
+											None
+										}
+									} else {
+										// 第一条消息不是鉴权消息，断开连接
+										warn!("Connection {} first message is not auth message, disconnecting", conn_id);
+										break;
+									};
+
+									match auth_result {
+										Some(user_id) => {
+											authenticated = true;
+											privy_id = Some(user_id.clone());
+											last_heartbeat = tokio::time::Instant::now();
+
+											// 注册连接到storage
+											state.storage.write().await.register_connection(
+												user_id.clone(),
+												conn_id.clone(),
+												tx.clone(),
+											);
+
+											info!("Connection {} authenticated as user {}", conn_id, user_id);
+
+											// 发送鉴权成功响应
+											let response = AuthResponse { event_type: "auth", success: true };
+											if ws_sender.send(Message::Text(serde_json::to_string(&response).expect("serialize auth response").into())).await.is_err() {
+												break;
+											}
+										}
+										None => {
+											// 发送鉴权失败响应并断开连接
+											let response = AuthResponse { event_type: "auth", success: false };
+											let _ = ws_sender.send(Message::Text(serde_json::to_string(&response).expect("serialize auth response").into())).await;
 											break;
 										}
 									}

@@ -24,6 +24,7 @@ pub fn get_client() -> &'static Client {
 const INTERNAL_IP_INFO_PATH: &str = "/internal/ip_info";
 const INTERNAL_PRIVY_USER_INFO_PATH: &str = "/internal/privy_user_info";
 const INTERNAL_GOOGLE_IMAGE_SIGN_PATH: &str = "/internal/google_image_sign";
+const INTERNAL_EIP712_ORDER_VERIFY_PATH: &str = "/internal/eip712_order_verify";
 
 /// 内部服务统一返回格式
 /// 对应Go代码中的 Response 格式：{code, msg, data}
@@ -168,5 +169,67 @@ pub async fn get_google_image_sign(req: ReqGetGoogleImageSign) -> Result<ResGetG
 	}
 
 	let result: InternalServiceResponse<ResGetGoogleImageSign> = response.json().await?;
+	result.into_result()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReqEip712OrderVerify {
+	#[serde(rename = "signature")]
+	pub signature: String,
+	#[serde(rename = "chain_id")]
+	pub chain_id: i32,
+	#[serde(rename = "order")]
+	pub order: SignOrder,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignOrder {
+	#[serde(rename = "Salt")]
+	pub salt: String,
+	#[serde(rename = "Maker")]
+	pub maker: String,
+	#[serde(rename = "Signer")]
+	pub signer: String,
+	#[serde(rename = "Taker")]
+	pub taker: String,
+	#[serde(rename = "TokenId")]
+	pub token_id: String,
+	#[serde(rename = "MakerAmount")]
+	pub maker_amount: String,
+	#[serde(rename = "TakerAmount")]
+	pub taker_amount: String,
+	#[serde(rename = "Expiration")]
+	pub expiration: String,
+	#[serde(rename = "Nonce")]
+	pub nonce: String,
+	#[serde(rename = "FeeRateBps")]
+	pub fee_rate_bps: String,
+	#[serde(rename = "Side")]
+	pub side: i32,
+	#[serde(rename = "SignatureType")]
+	pub signature_type: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResEip712OrderVerify {
+	#[serde(rename = "recovered_signer")]
+	pub recovered_signer: String,
+	#[serde(rename = "valid")]
+	pub valid: bool,
+}
+
+/// 验证 EIP712 订单签名
+pub async fn verify_eip712_order(req: ReqEip712OrderVerify) -> Result<ResEip712OrderVerify> {
+	let internal_service_host = &common::common_env::get_common_env().internal_service_host;
+	let url = format!("{}{}", internal_service_host, INTERNAL_EIP712_ORDER_VERIFY_PATH);
+
+	let client = get_client();
+	let response = client.post(&url).json(&req).send().await?;
+
+	if !response.status().is_success() {
+		return Err(anyhow::anyhow!("Failed to verify eip712 order: status={}, body={}", response.status(), response.text().await.unwrap_or_default()));
+	}
+
+	let result: InternalServiceResponse<ResEip712OrderVerify> = response.json().await?;
 	result.into_result()
 }

@@ -69,6 +69,8 @@ pub struct OnchainMQEventMarket {
 	pub token_ids: Vec<String>,
 	#[serde(default)]
 	pub outcomes: Vec<String>,
+	#[serde(default)]
+	pub question: String,
 }
 
 /// 单个 Market 添加消息 (用于 onchain_event_stream)
@@ -83,8 +85,11 @@ pub struct OnchainMQMarketAdd {
 pub struct OnchainMQMarketClose {
 	pub event_id: i64,
 	pub market_id: i16,
+	pub condition_id: String,
+	pub token_ids: Vec<String>,
 	pub win_outcome_token_id: String,
 	pub win_outcome_name: String,
+	pub question: String,
 }
 
 /// 统一的事件消息枚举 (用于 onchain_event_stream)

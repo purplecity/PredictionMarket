@@ -27,6 +27,7 @@ COPY onchain_msg ./onchain_msg
 COPY websocket_depth ./websocket_depth
 COPY websocket_user ./websocket_user
 COPY asset ./asset
+COPY statistics ./statistics
 COPY tests ./tests
 
 # Build the project in release mode

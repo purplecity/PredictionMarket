@@ -10,7 +10,7 @@ use {
 	axum::{Router, routing::get},
 	handler::AppState,
 	std::sync::Arc,
-	storage::UserStorage,
+	storage::{ApiKeyStorage, UserStorage},
 	tokio::sync::RwLock,
 	tracing::info,
 };
@@ -23,14 +23,24 @@ async fn main() -> anyhow::Result<()> {
 	// 创建用户连接存储
 	let storage = Arc::new(RwLock::new(UserStorage::new()));
 
-	// 启动消费任务
+	// 创建 API Key 存储并从数据库加载
+	let api_key_storage = Arc::new(RwLock::new(ApiKeyStorage::new()));
+	init::load_api_keys(api_key_storage.clone()).await?;
+
+	// 启动用户事件消费任务
 	let storage_clone = storage.clone();
 	tokio::spawn(async move {
 		consumer::start_consumer_task(storage_clone).await;
 	});
 
+	// 启动 API Key 变更消费任务
+	let api_key_storage_clone = api_key_storage.clone();
+	tokio::spawn(async move {
+		consumer::start_api_key_consumer_task(api_key_storage_clone).await;
+	});
+
 	// 创建应用状态
-	let app_state = AppState { storage };
+	let app_state = AppState { storage, api_key_storage };
 
 	// 创建路由
 	let app = Router::new().route("/user", get(handler::ws_handler)).with_state(app_state);
@@ -57,3 +67,5 @@ async fn main() -> anyhow::Result<()> {
 
 	Ok(())
 }
+
+// for sidekick

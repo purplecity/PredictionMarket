@@ -1564,7 +1564,7 @@ async fn test_market_order_buy_partial_quantity_from_large_order() {
 	// 1. 吃 maker1 全部(50 @ 500): 500 * 50 / 1000000 = 0.025 USDC，剩余 0.025 USDC
 	// 2. 吃 maker2 部分: 0.025 USDC / (700/1000000) ≈ 35 quantity
 	// maker2 剩余 165 quantity
-	let taker = create_market_order("taker", OrderSide::Buy, 9900, 0); // price=9900(max), quantity=0
+	let taker = create_market_order("taker", OrderSide::Buy, 9900, 0); // price=9900, quantity=0
 	// 手动构建 SubmitOrderMessage，volume=0.05
 	let mut taker_msg = order_to_submit_message(&taker);
 	taker_msg.volume = Decimal::new(5, 2); // 0.05 USDC

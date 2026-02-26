@@ -201,6 +201,7 @@ pub struct Positions {
 	pub payout: Option<Decimal>,      //赎回的金额
 	pub privy_id: Option<String>,     // 用于websocket推送
 	pub outcome_name: Option<String>, // 用于websocket推送
+	pub question: Option<String>,     // 用于文本搜索
 	pub update_id: i64,               // 用于websocket消息顺序保证，每次更新自增
 	pub updated_at: chrono::DateTime<Utc>,
 	pub created_at: chrono::DateTime<Utc>,
@@ -273,4 +274,67 @@ pub struct OperationHistory {
 	pub value: Option<Decimal>,
 	pub tx_hash: String,
 	pub created_at: chrono::DateTime<Utc>,
+}
+
+/// 用户 API Key
+/// 允许特殊用户通过 API Key 访问 API 和 WebSocket，无需 JWT Token
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct UserApiKey {
+	pub user_id: i64,
+	pub privy_id: String,
+	pub api_key: String,
+}
+
+/// 用户邀请关系记录
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct UserInvitation {
+	pub user_id: i64,
+	pub inviter_id: Option<i64>, // NULL 表示自行注册
+	pub created_at: chrono::DateTime<Utc>,
+}
+
+/// 用户积分数据（赛季制）
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct Points {
+	pub user_id: i64,
+	pub liquidity_points: i64,       // 流动性积分
+	pub trading_points: i64,         // 交易积分
+	pub self_points: i64,            // 自己获得原始积分 = liquidity + trading
+	pub boost_points: i64,           // boost后积分 = self_points * boost倍数
+	pub invite_earned_points: i64,   // 邀请获得积分
+	pub total_points: i64,           // 总积分 = boost_points + invite_earned_points
+	pub accumulated_volume: Decimal, // 累积交易量
+	pub created_at: chrono::DateTime<Utc>,
+	pub updated_at: chrono::DateTime<Utc>,
+}
+
+/// 赛季配置
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct Season {
+	pub id: i32,
+	pub name: String,
+	pub start_time: chrono::DateTime<Utc>,
+	pub end_time: chrono::DateTime<Utc>,
+	pub active: bool,
+	pub created_at: chrono::DateTime<Utc>,
+}
+
+/// 赛季历史数据
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct SeasonHistory {
+	pub season_id: i32,
+	pub user_id: i64,
+	pub total_points: i64,
+	pub accumulated_volume: Decimal,
+}
+
+/// 用户积分元数据
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct PointMetadata {
+	pub user_id: i64,
+	pub trading_points_ratio: i32, // 交易积分比例 (除以10000)，如1表示0.01%
+	pub invite_points_ratio: i32,  // 邀请获得比例 (除以100)，如5表示5%
+	pub invitee_boost: Decimal,    // 被邀请人boost倍数，如1.50表示1.5倍
+	pub created_at: chrono::DateTime<Utc>,
+	pub updated_at: chrono::DateTime<Utc>,
 }

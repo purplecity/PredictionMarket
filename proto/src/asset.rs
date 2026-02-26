@@ -40,6 +40,9 @@ pub struct DepositRequest {
     /// 用于websocket推送
     #[prost(string, tag = "8")]
     pub outcome_name: ::prost::alloc::string::String,
+    /// 用于文本搜索
+    #[prost(string, tag = "9")]
+    pub question: ::prost::alloc::string::String,
 }
 /// 提现通知
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -264,6 +267,9 @@ pub struct TakerTradeOnchainInfo {
     /// 用于websocket推送
     #[prost(string, tag = "12")]
     pub taker_outcome_name: ::prost::alloc::string::String,
+    /// 用于文本搜索
+    #[prost(string, tag = "13")]
+    pub question: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct MakerTradeOnchainInfo {
@@ -321,6 +327,9 @@ pub struct SplitRequest {
     /// token_1 outcome名称
     #[prost(string, tag = "12")]
     pub outcome_name_1: ::prost::alloc::string::String,
+    /// 用于文本搜索
+    #[prost(string, tag = "13")]
+    pub question: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct MergeRequest {
@@ -351,6 +360,9 @@ pub struct MergeRequest {
     /// token_1 outcome名称
     #[prost(string, tag = "12")]
     pub outcome_name_1: ::prost::alloc::string::String,
+    /// 用于文本搜索
+    #[prost(string, tag = "13")]
+    pub question: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RedeemRequest {
@@ -377,6 +389,12 @@ pub struct RedeemRequest {
     /// token_1 outcome名称
     #[prost(string, tag = "12")]
     pub outcome_name_1: ::prost::alloc::string::String,
+    /// 赢的结果token id，用于确定更新哪个position
+    #[prost(string, tag = "13")]
+    pub win_outcome_token_id: ::prost::alloc::string::String,
+    /// 用于文本搜索
+    #[prost(string, tag = "14")]
+    pub question: ::prost::alloc::string::String,
 }
 /// Generated client implementations.
 pub mod asset_service_client {

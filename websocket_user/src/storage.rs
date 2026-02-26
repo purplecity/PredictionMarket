@@ -2,12 +2,54 @@ use {
 	common::websocket_types::{ServerMsg, UserEvent},
 	std::collections::HashMap,
 	tokio::sync::mpsc,
-	tracing::error,
+	tracing::{error, info},
 };
 
 /// 用户连接句柄，用于向客户端发送消息
 /// 元组: (tracking_key, update_id, json_string)
 pub type UserSender = mpsc::UnboundedSender<(String, i64, String)>;
+
+/// API Key 映射存储
+/// 存储 api_key -> privy_id 的映射关系
+#[derive(Default)]
+pub struct ApiKeyStorage {
+	/// api_key -> privy_id
+	api_keys: HashMap<String, String>,
+}
+
+impl ApiKeyStorage {
+	pub fn new() -> Self {
+		Self { api_keys: HashMap::new() }
+	}
+
+	/// 添加 api_key 映射
+	pub fn add(&mut self, api_key: String, privy_id: String) {
+		self.api_keys.insert(api_key, privy_id);
+	}
+
+	/// 移除 api_key 映射
+	pub fn remove(&mut self, api_key: &str) -> Option<String> {
+		self.api_keys.remove(api_key)
+	}
+
+	/// 根据 api_key 获取 privy_id
+	pub fn get_privy_id(&self, api_key: &str) -> Option<&String> {
+		self.api_keys.get(api_key)
+	}
+
+	/// 批量加载 api_keys
+	pub fn load_batch(&mut self, entries: Vec<(String, String)>) {
+		for (api_key, privy_id) in entries {
+			self.api_keys.insert(api_key, privy_id);
+		}
+		info!("Loaded {} api_keys into storage", self.api_keys.len());
+	}
+
+	/// 获取当前存储的 api_key 数量
+	pub fn count(&self) -> usize {
+		self.api_keys.len()
+	}
+}
 
 /// 单个用户的所有连接
 #[derive(Default)]

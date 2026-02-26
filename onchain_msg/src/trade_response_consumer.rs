@@ -1,5 +1,5 @@
 use {
-	crate::{config, consts, rpc_client},
+	crate::{cache, config, consts, rpc_client},
 	common::{
 		consts::{TRADE_RESPONSE_MSG_KEY, TRADE_RESPONSE_STREAM},
 		onchain_msg_types::TradeOnchainSendResponse,
@@ -139,7 +139,7 @@ async fn consumer_task(group_name: String, consumer_id: String, batch_size: usiz
 }
 
 async fn process_new_messages(conn: &mut impl AsyncCommands, group: &str, consumer: &str, batch_size: usize) -> anyhow::Result<()> {
-	let opts = StreamReadOptions::default().group(group, consumer).count(batch_size).block(1000);
+	let opts = StreamReadOptions::default().group(group, consumer).count(batch_size).block(5000);
 
 	let reply: redis::streams::StreamReadReply = conn.xread_options(&[TRADE_RESPONSE_STREAM], &[">"], &opts).await?;
 
@@ -171,6 +171,9 @@ async fn process_message(json_str: &str) -> anyhow::Result<()> {
 
 	info!("Handling TradeOnchainSendResponse: trade_id={}, success={}", response.trade_id, response.success);
 
+	// Look up question from cache using taker_token_id
+	let question = cache::query_question(&response.taker_trade_info.taker_token_id).await.unwrap_or_default();
+
 	// Construct TradeOnchainSendResultRequest with proto types
 	let taker_info = proto::TakerTradeOnchainInfo {
 		taker_side: response.taker_trade_info.taker_side,
@@ -184,6 +187,7 @@ async fn process_message(json_str: &str) -> anyhow::Result<()> {
 		taker_unfreeze_amount: response.taker_trade_info.taker_unfreeze_amount,
 		taker_privy_user_id: response.taker_trade_info.taker_privy_user_id,
 		taker_outcome_name: response.taker_trade_info.taker_outcome_name,
+		question,
 	};
 
 	let maker_infos: Vec<proto::MakerTradeOnchainInfo> = response

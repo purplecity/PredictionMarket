@@ -39,7 +39,7 @@ const (
 	// Redis 配置
 	REDIS_HOST     = "35.200.1.149:6379"
 	REDIS_PASSWORD = "mZDUu0M43KmvMo1ehuiz"
-	REDIS_DB       = 6 // engine_input_mq 使用 DB 6
+	REDIS_DB       = 0 // engine_input_mq 使用 DB 0
 )
 
 // Event 数据库表结构
@@ -163,11 +163,11 @@ func sortOutcomesAndTokenIDs(outcomes []string, tokenIDs []string) ([]string, []
 	return sortedOutcomes, sortedTokenIDs
 }
 
-// sendEventCreate 发送未关闭的事件创建消息到 match_engine
+// sendEventCreate 发送未关闭且未过期的事件创建消息到 match_engine
 func sendEventCreate(ctx context.Context, pgPool *pgxpool.Pool, rdb *redis.Client) error {
-	// 查询 closed=false 的事件
+	// 查询 closed=false 且未过期的事件
 	query := `SELECT id, event_identifier, slug, title, description, image, end_date, topic, markets, closed, created_at
-	          FROM events WHERE closed = false ORDER BY id`
+	          FROM events WHERE closed = false AND (end_date IS NULL OR end_date > NOW()) ORDER BY id`
 	rows, err := pgPool.Query(ctx, query)
 	if err != nil {
 		return fmt.Errorf("failed to query events: %w", err)

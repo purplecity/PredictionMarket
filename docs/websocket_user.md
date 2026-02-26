@@ -23,11 +23,23 @@ ws://host:port/user
 
 ### 鉴权
 
-连接后必须立即发送鉴权消息：
+连接后必须立即发送鉴权消息，支持两种方式：
+
+**方式一：Privy JWT Token（推荐）**
 
 ```json
 {"auth": "privy_jwt_token"}
 ```
+
+**方式二：API Key**
+
+```json
+{"api_key": "your_api_key"}
+```
+
+**说明：**
+- **前端应用请使用 Privy JWT Token 认证**
+- API Key 仅用于特殊场景：自动化脚本、做市商程序、第三方集成等
 
 ### 心跳
 
@@ -285,8 +297,13 @@ ws.onmessage = (event) => {
     console.log('连接成功，连接ID:', connectionId);
 
     // 收到连接成功消息后立即发送鉴权消息
+    // 方式一：使用 Privy JWT Token
     const token = getPrivyJwtToken();
     ws.send(JSON.stringify({ auth: token }));
+
+    // 方式二：使用 API Key
+    // const apiKey = getApiKey();
+    // ws.send(JSON.stringify({ api_key: apiKey }));
     return;
   }
 
@@ -376,7 +393,11 @@ function handlePositionChange(data) {
 
 服务端: {"event_type": "connected", "id": "550e8400-e29b-41d4-a716-446655440000"}
 
+// 鉴权方式一：JWT Token
 客户端: {"auth": "eyJ..."}
+
+// 鉴权方式二：API Key（二选一）
+// 客户端: {"api_key": "your_api_key_here"}
 
 服务端: {"event_type": "auth", "success": true}
 
@@ -472,10 +493,12 @@ function handlePositionChange(data) {
 
 ## 鉴权说明
 
+- 支持两种认证方式：Privy JWT Token 或 API Key
 - JWT 令牌必须是有效的 Privy 令牌
+- API Key 必须是有效的密钥
 - 连接后必须立即发送鉴权消息（第一条消息）
-- 令牌无效或过期将拒绝连接
-- 断开连接后，客户端应使用新令牌重新连接
+- 令牌/密钥无效或过期将拒绝连接
+- 断开连接后，客户端应使用新令牌/密钥重新连接
 
 ## 错误处理
 

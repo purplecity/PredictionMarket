@@ -1,0 +1,10 @@
+# Binary
+market_bot
+*.exe
+
+# Logs
+bot.log
+
+# IDE
+.idea/
+.vscode/

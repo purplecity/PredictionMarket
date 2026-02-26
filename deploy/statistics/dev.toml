@@ -1,0 +1,10 @@
+[logging]
+level = "info"
+file = "./logs/statistics.log"
+console = false
+rotation_max_files = 3
+
+[scheduler]
+# UTC 时区，0:00 执行
+utc_hour = 0
+utc_minute = 0

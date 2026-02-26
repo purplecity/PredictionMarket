@@ -663,17 +663,17 @@ async fn test_edge_case_large_numbers() {
 async fn test_edge_case_price_boundary_max() {
 	let mut engine = create_match_engine();
 
-	// 盘口：价格 = 9900（最大值）
-	let maker = create_test_order("maker1", OrderSide::Sell, 9900, 100, 2);
+	// 盘口：价格 = 9990（最大值）
+	let maker = create_test_order("maker1", OrderSide::Sell, 9990, 100, 2);
 	add_order_to_engine(&mut engine, maker);
 
-	// 限价买单 @ 9900
-	let taker = create_submit_message("taker", OrderSide::Buy, OrderType::Limit, 9900, 100, "0.99", 1);
+	// 限价买单 @ 9990
+	let taker = create_submit_message("taker", OrderSide::Buy, OrderType::Limit, 9990, 100, "0.999", 1);
 
 	let result = engine.get_cross_matching_orders(&taker);
 
 	assert_eq!(result.filled_quantity, 100);
-	assert_eq!(result.filled_volume, Decimal::from_str("0.99").unwrap()); // 100 * 9900 / 1000000
+	assert_eq!(result.filled_volume, Decimal::from_str("0.999").unwrap()); // 100 * 9990 / 1000000
 	assert_eq!(result.matched_orders.len(), 1);
 }
 
@@ -681,17 +681,17 @@ async fn test_edge_case_price_boundary_max() {
 async fn test_edge_case_price_boundary_min() {
 	let mut engine = create_match_engine();
 
-	// 盘口：价格 = 100（最小值）
-	let maker = create_test_order("maker1", OrderSide::Sell, 100, 10_000, 2);
+	// 盘口：价格 = 10（最小值）
+	let maker = create_test_order("maker1", OrderSide::Sell, 10, 100_000, 2);
 	add_order_to_engine(&mut engine, maker);
 
-	// 限价买单 @ 100
-	let taker = create_submit_message("taker", OrderSide::Buy, OrderType::Limit, 100, 10_000, "1", 1);
+	// 限价买单 @ 10
+	let taker = create_submit_message("taker", OrderSide::Buy, OrderType::Limit, 10, 100_000, "1", 1);
 
 	let result = engine.get_cross_matching_orders(&taker);
 
-	assert_eq!(result.filled_quantity, 10_000);
-	assert_eq!(result.filled_volume, Decimal::from_str("1").unwrap()); // 10000 * 100 / 1000000 = 1
+	assert_eq!(result.filled_quantity, 100_000);
+	assert_eq!(result.filled_volume, Decimal::from_str("1").unwrap()); // 100000 * 10 / 1000000 = 1
 	assert_eq!(result.matched_orders.len(), 1);
 }
 

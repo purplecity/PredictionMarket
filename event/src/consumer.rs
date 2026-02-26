@@ -120,7 +120,7 @@ pub async fn consumer_task() {
 /// 读取并处理消息
 async fn read_messages<C: redis::AsyncCommands>(conn: &mut C, last_id: &mut String) -> anyhow::Result<()> {
 	// 使用 XREAD 读取消息，每次只读取一条
-	let options = redis::streams::StreamReadOptions::default().count(1).block(0); // 一直阻塞直到收到消息
+	let options = redis::streams::StreamReadOptions::default().count(1).block(5000); // 一直阻塞直到收到消息
 	let keys = vec![EVENT_MQ_STREAM];
 	let ids = vec![last_id.as_str()];
 	let result: redis::RedisResult<Option<redis::streams::StreamReadReply>> = conn.xread_options(&keys, &ids, &options).await;
@@ -168,8 +168,9 @@ async fn read_messages<C: redis::AsyncCommands>(conn: &mut C, last_id: &mut Stri
 			// 没有消息，继续等待
 		}
 		Err(e) => {
-			// 打印错误，继续循环
+			// 返回错误让外层重连（如 Redis 重启后 broken pipe）
 			error!("Redis XREAD error: {}", e);
+			return Err(e.into());
 		}
 	}
 
@@ -317,7 +318,7 @@ async fn handle_event_create(event_create: EventCreate) -> anyhow::Result<()> {
 		let engine_market = EngineMQEventMarket { market_id, outcomes: outcomes.clone(), token_ids: token_ids.clone() };
 
 		// 构造 OnchainMQEventMarket
-		let onchain_market = OnchainMQEventMarket { market_id, condition_id: market.condition_id.clone(), token_ids: token_ids.clone(), outcomes: outcomes.clone() };
+		let onchain_market = OnchainMQEventMarket { market_id, condition_id: market.condition_id.clone(), token_ids: token_ids.clone(), outcomes: outcomes.clone(), question: market.question.clone() };
 
 		db_markets.insert(market_id_str.clone(), db_market);
 		api_markets.insert(market_id_str.clone(), api_market);
@@ -697,7 +698,13 @@ async fn handle_market_add(market_add: MarketAdd) -> anyhow::Result<()> {
 	})?;
 
 	// 10. 推送到 ONCHAIN stream
-	let onchain_market = OnchainMQEventMarket { market_id: new_market_id, condition_id: market_add.market.condition_id.clone(), token_ids: token_ids.clone(), outcomes: outcomes.clone() };
+	let onchain_market = OnchainMQEventMarket {
+		market_id: new_market_id,
+		condition_id: market_add.market.condition_id.clone(),
+		token_ids: token_ids.clone(),
+		outcomes: outcomes.clone(),
+		question: market_add.market.question.clone(),
+	};
 	let onchain_msg = OnchainEventMessage::MarketAdd(common::event_types::OnchainMQMarketAdd { event_id, market: onchain_market });
 	publish_to_stream(ONCHAIN_EVENT_STREAM, ONCHAIN_EVENT_MSG_KEY, &onchain_msg).await.map_err(|e| {
 		error!("MarketAdd: Failed to publish to ONCHAIN stream: {}, event_id: {}, market_id: {}", e, event_id, new_market_id);
@@ -746,11 +753,16 @@ async fn handle_market_close(market_close: MarketClose) -> anyhow::Result<()> {
 		anyhow::anyhow!("Event not found: {}", market_close.event_identifier)
 	})?;
 
-	// 2. 查找 market_id
-	let market_id = markets_json.0.iter().find(|(_, m)| m.market_identifier == market_close.market_result.market_identifier).and_then(|(id_str, _)| id_str.parse::<i16>().ok()).ok_or_else(|| {
-		error!("MarketClose: Market not found, market_identifier: {}", market_close.market_result.market_identifier);
-		anyhow::anyhow!("Market not found: {}", market_close.market_result.market_identifier)
-	})?;
+	// 2. 查找 market_id 和 market 信息
+	let (market_id, market_info) = markets_json
+		.0
+		.iter()
+		.find(|(_, m)| m.market_identifier == market_close.market_result.market_identifier)
+		.and_then(|(id_str, m)| id_str.parse::<i16>().ok().map(|id| (id, m.clone())))
+		.ok_or_else(|| {
+			error!("MarketClose: Market not found, market_identifier: {}", market_close.market_result.market_identifier);
+			anyhow::anyhow!("Market not found: {}", market_close.market_result.market_identifier)
+		})?;
 
 	let market_id_str = market_id.to_string();
 	let closed_at = Utc::now();
@@ -805,8 +817,11 @@ async fn handle_market_close(market_close: MarketClose) -> anyhow::Result<()> {
 	let onchain_msg = OnchainEventMessage::MarketClose(common::event_types::OnchainMQMarketClose {
 		event_id,
 		market_id,
+		condition_id: market_info.condition_id.clone(),
+		token_ids: market_info.token_ids.clone(),
 		win_outcome_token_id: market_close.market_result.win_outcome_token_id.clone(),
 		win_outcome_name: market_close.market_result.win_outcome_name.clone(),
+		question: market_info.question.clone(),
 	});
 	publish_to_stream(ONCHAIN_EVENT_STREAM, ONCHAIN_EVENT_MSG_KEY, &onchain_msg).await.map_err(|e| {
 		error!("MarketClose: Failed to publish to ONCHAIN stream: {}, event_id: {}, market_id: {}", e, event_id, market_id);

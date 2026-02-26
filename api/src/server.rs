@@ -1,8 +1,9 @@
 use {
 	crate::{
 		handlers::{
-			handle_cancel_all_orders, handle_cancel_order, handle_event_detail, handle_events, handle_image_sign, handle_place_order, handle_topics, handle_user_data, handle_user_image,
-			handle_user_profile,
+			handle_balance, handle_cancel_all_orders, handle_cancel_order, handle_current_season, handle_event_detail, handle_event_streamers, handle_events, handle_image_sign, handle_invite_records,
+			handle_invite_stats, handle_leaderboard_points, handle_leaderboard_volume, handle_lives, handle_place_order, handle_points, handle_seasons_list, handle_simple_info,
+			handle_streamer_detail, handle_streamer_viewer_count, handle_topics, handle_user_data, handle_user_image, handle_user_points_volumes, handle_user_profile,
 		},
 		user_handlers::{
 			handle_activity, handle_closed_positions, handle_depth, handle_event_balance, handle_open_orders, handle_order_history, handle_portfolio_value, handle_positions, handle_traded_volume,
@@ -42,6 +43,7 @@ pub struct ClientInfo {
 	pub request_id: String,
 	pub ip: String,
 	pub privy_id: Option<String>,
+	pub api_key: String,
 }
 
 //中间件
@@ -65,9 +67,12 @@ async fn extract_and_check(State(state): State<AppState>, connect_info: ConnectI
 	let app_id = common_env.privy_app_id.clone();
 	let privy_id = request.headers().get(AUTHORIZATION).and_then(|header| header.to_str().ok()).and_then(|token| common::privy_jwt::check_privy_jwt(token, &pem_key, &app_id).ok());
 
+	// 从请求头中获取 api_key
+	let api_key = request.headers().get("x-api-key").and_then(|header| header.to_str().ok()).map(|s| s.to_string()).unwrap_or_default();
+
 	let x_request_id = HeaderName::from_static("x-request-id");
 	let request_id = request.headers().get(x_request_id).and_then(|header| header.to_str().ok()).map(|header| header.to_string()).unwrap_or_else(|| Uuid::new_v4().to_string());
-	request.extensions_mut().insert(ClientInfo { request_id, ip: ip.clone(), privy_id: privy_id.clone() });
+	request.extensions_mut().insert(ClientInfo { request_id, ip: ip.clone(), privy_id: privy_id.clone(), api_key });
 
 	// check
 	let rate_limiter_clone = state.rate_limiter.clone();
@@ -103,6 +108,10 @@ const RATE_LIMIT_PATTERNS: &[&str] = &[
 	"/topics",
 	"/events",
 	"/event_detail",
+	"/event_streamers",
+	"/lives",
+	"/streamer_detail",
+	"/streamer_viewer_count",
 	"/portfolio_value",
 	"/traded_volume",
 	"/positions",
@@ -112,6 +121,16 @@ const RATE_LIMIT_PATTERNS: &[&str] = &[
 	"/order_history",
 	"/depth",
 	"/event_balance",
+	"/invite_stats",
+	"/invite_records",
+	"/leaderboard_points",
+	"/leaderboard_volume",
+	"/season_current",
+	"/seasons",
+	"/balance",
+	"/points",
+	"/simple_info",
+	"/user_points_volumes",
 ];
 
 pub fn app() -> anyhow::Result<Router> {
@@ -129,6 +148,10 @@ pub fn app() -> anyhow::Result<Router> {
 		.route("/topics", get(handle_topics))
 		.route("/events", get(handle_events))
 		.route("/event_detail", get(handle_event_detail))
+		.route("/event_streamers", get(handle_event_streamers))
+		.route("/lives", get(handle_lives))
+		.route("/streamer_detail", get(handle_streamer_detail))
+		.route("/streamer_viewer_count", get(handle_streamer_viewer_count))
 		.route("/portfolio_value", get(handle_portfolio_value))
 		.route("/traded_volume", get(handle_traded_volume))
 		.route("/positions", get(handle_positions))
@@ -138,6 +161,16 @@ pub fn app() -> anyhow::Result<Router> {
 		.route("/order_history", get(handle_order_history))
 		.route("/depth", get(handle_depth))
 		.route("/event_balance", get(handle_event_balance))
+		.route("/invite_stats", get(handle_invite_stats))
+		.route("/invite_records", get(handle_invite_records))
+		.route("/leaderboard_points", get(handle_leaderboard_points))
+		.route("/leaderboard_volume", get(handle_leaderboard_volume))
+		.route("/season_current", get(handle_current_season))
+		.route("/seasons", get(handle_seasons_list))
+		.route("/balance", get(handle_balance))
+		.route("/points", get(handle_points))
+		.route("/simple_info", get(handle_simple_info))
+		.route("/user_points_volumes", get(handle_user_points_volumes))
 		.layer(PropagateRequestIdLayer::new(x_request_id.clone())) //将请求id从请求头中传递到响应头中
 		.layer(CompressionLayer::new())
 		.layer(middleware::from_fn_with_state(state.clone(), extract_and_check))

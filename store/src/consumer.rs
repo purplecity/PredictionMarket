@@ -100,7 +100,7 @@ pub async fn consumer_task(storage: Arc<OrderStorage>, initial_last_id: Option<S
 /// 读取并处理消息
 async fn read_messages<C: redis::AsyncCommands>(batch_size: usize, conn: &mut C, last_id: &mut String, storage: Arc<OrderStorage>) -> anyhow::Result<()> {
 	// 使用 XREAD 读取消息，从配置文件读取 batch_size
-	let options = redis::streams::StreamReadOptions::default().count(batch_size).block(0); // 一直阻塞直到收到消息
+	let options = redis::streams::StreamReadOptions::default().count(batch_size).block(5000); // 一直阻塞直到收到消息
 	let keys = vec![STORE_STREAM];
 	let ids = vec![last_id.as_str()];
 	let result: redis::RedisResult<Option<redis::streams::StreamReadReply>> = conn.xread_options(&keys, &ids, &options).await;

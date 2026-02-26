@@ -152,7 +152,7 @@ pub async fn start_consumer_task(storage: Arc<DepthStorage>, startup_complete_tx
 /// 读取并处理消息
 async fn read_messages<C: redis::AsyncCommands>(conn: &mut C, storage: &Arc<DepthStorage>, last_id: &mut String) -> anyhow::Result<()> {
 	// 使用 XREAD 批量读取消息，使用短超时以便检查启动窗口
-	let options = StreamReadOptions::default().count(DEPTH_EVENT_BATCH_SIZE).block(1000);
+	let options = StreamReadOptions::default().count(DEPTH_EVENT_BATCH_SIZE).block(5000);
 	let keys = vec![WEBSOCKET_STREAM];
 	let ids = vec![last_id.as_str()];
 	let result: redis::RedisResult<Option<redis::streams::StreamReadReply>> = conn.xread_options(&keys, &ids, &options).await;
@@ -197,7 +197,9 @@ async fn read_messages<C: redis::AsyncCommands>(conn: &mut C, storage: &Arc<Dept
 			// 没有消息，继续等待
 		}
 		Err(e) => {
+			// 返回错误让外层重连（如 Redis 重启后 broken pipe）
 			error!("Redis XREAD error: {}", e);
+			return Err(e.into());
 		}
 	}
 

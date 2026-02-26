@@ -134,7 +134,7 @@ pub struct Order {
 	pub side: OrderSide,
 	pub order_type: OrderType,
 	pub quantity: u64,              // 预测市场交易的数量 其实是股份 最多2位小数乘以了100 变成了整数
-	pub price: i32,                 // 原始价格乘以10000变成整数 [0.0001,0.9999]->[1,9999]
+	pub price: i32,                 // 原始价格乘以10000变成整数 [0.001,0.999]->[10,9990]
 	pub opposite_result_price: i32, // 相反结果的价格 等于10000-price
 	pub status: OrderStatus,
 	pub filled_quantity: u64,

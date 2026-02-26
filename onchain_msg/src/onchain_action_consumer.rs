@@ -159,7 +159,7 @@ async fn consumer_task(group_name: String, consumer_id: String, batch_size: usiz
 }
 
 async fn process_new_messages(conn: &mut impl AsyncCommands, group: &str, consumer: &str, batch_size: usize) -> anyhow::Result<()> {
-	let opts = StreamReadOptions::default().group(group, consumer).count(batch_size).block(1000);
+	let opts = StreamReadOptions::default().group(group, consumer).count(batch_size).block(5000);
 
 	let reply: redis::streams::StreamReadReply = conn.xread_options(&[ONCHAIN_ACTION_STREAM], &[">"], &opts).await?;
 
@@ -204,8 +204,8 @@ async fn handle_deposit(deposit: Deposit) -> anyhow::Result<()> {
 	info!("Handling Deposit: user_id={}, token_id={}, amount={}", deposit.user_id, deposit.token_id, deposit.amount);
 
 	// For USDC deposits, event_id and market_id are both 0
-	// For other tokens, query token_id to get event_id, market_id, and outcome_name
-	let (event_id, market_id, outcome_name) = if deposit.token_id == USDC_TOKEN_ID { (0, 0, String::new()) } else { cache::query_token_id(&deposit.token_id).await? };
+	// For other tokens, query token_id to get event_id, market_id, outcome_name, and question
+	let (event_id, market_id, outcome_name, question) = if deposit.token_id == USDC_TOKEN_ID { (0, 0, String::new(), String::new()) } else { cache::query_token_id(&deposit.token_id).await? };
 
 	// Normalize amount
 	let normalized_amount = normalize_amount(&deposit.amount)?;
@@ -219,6 +219,7 @@ async fn handle_deposit(deposit: Deposit) -> anyhow::Result<()> {
 		market_id: market_id as i32,
 		privy_id: deposit.privy_id,
 		outcome_name,
+		question,
 	};
 
 	let response = rpc_client::deposit(request).await?;
@@ -233,8 +234,13 @@ async fn handle_withdraw(withdraw: Withdraw) -> anyhow::Result<()> {
 	info!("Handling Withdraw: user_id={}, token_id={}, amount={}", withdraw.user_id, withdraw.token_id, withdraw.amount);
 
 	// For USDC withdrawals, event_id and market_id are both 0
-	// For other tokens, query token_id to get event_id, market_id, and outcome_name
-	let (event_id, market_id, outcome_name) = if withdraw.token_id == USDC_TOKEN_ID { (0, 0, String::new()) } else { cache::query_token_id(&withdraw.token_id).await? };
+	// For other tokens, query token_id to get event_id, market_id, and outcome_name (question not needed for withdraw)
+	let (event_id, market_id, outcome_name) = if withdraw.token_id == USDC_TOKEN_ID {
+		(0, 0, String::new())
+	} else {
+		let (event_id, market_id, outcome_name, _question) = cache::query_token_id(&withdraw.token_id).await?;
+		(event_id, market_id, outcome_name)
+	};
 
 	// Normalize amount
 	let normalized_amount = normalize_amount(&withdraw.amount)?;
@@ -261,8 +267,8 @@ async fn handle_withdraw(withdraw: Withdraw) -> anyhow::Result<()> {
 async fn handle_split(split: Split) -> anyhow::Result<()> {
 	info!("Handling Split: user_id={}, condition_id={}, amount={}", split.user_id, split.condition_id, split.amount);
 
-	// Query condition_id to get event_id, market_id, and token_ids
-	let (event_id, market_id, token_ids) = cache::query_condition_id(&split.condition_id).await?;
+	// Query condition_id to get event_id, market_id, token_ids, and question (不需要 win_outcome_token_id)
+	let (event_id, market_id, token_ids, _, question) = cache::query_condition_id(&split.condition_id, false).await?;
 
 	// Extract token_ids
 	if token_ids.len() != 2 {
@@ -291,6 +297,7 @@ async fn handle_split(split: Split) -> anyhow::Result<()> {
 		privy_id: split.privy_id,
 		outcome_name_0,
 		outcome_name_1,
+		question,
 	};
 
 	let response = rpc_client::split(request).await?;
@@ -304,8 +311,8 @@ async fn handle_split(split: Split) -> anyhow::Result<()> {
 async fn handle_merge(merge: Merge) -> anyhow::Result<()> {
 	info!("Handling Merge: user_id={}, condition_id={}, amount={}", merge.user_id, merge.condition_id, merge.amount);
 
-	// Query condition_id to get event_id, market_id, and token_ids
-	let (event_id, market_id, token_ids) = cache::query_condition_id(&merge.condition_id).await?;
+	// Query condition_id to get event_id, market_id, token_ids, and question (不需要 win_outcome_token_id)
+	let (event_id, market_id, token_ids, _, question) = cache::query_condition_id(&merge.condition_id, false).await?;
 
 	// Extract token_ids
 	if token_ids.len() != 2 {
@@ -334,6 +341,7 @@ async fn handle_merge(merge: Merge) -> anyhow::Result<()> {
 		privy_id: merge.privy_id,
 		outcome_name_0,
 		outcome_name_1,
+		question,
 	};
 
 	let response = rpc_client::merge(request).await?;
@@ -347,8 +355,8 @@ async fn handle_merge(merge: Merge) -> anyhow::Result<()> {
 async fn handle_redeem(redeem: Redeem) -> anyhow::Result<()> {
 	info!("Handling Redeem: user_id={}, condition_id={}, payout={}", redeem.user_id, redeem.condition_id, redeem.payout);
 
-	// Query condition_id to get event_id, market_id, and token_ids
-	let (event_id, market_id, token_ids) = cache::query_condition_id(&redeem.condition_id).await?;
+	// Query condition_id to get event_id, market_id, token_ids, win_outcome_token_id, and question (需要 win_outcome_token_id)
+	let (event_id, market_id, token_ids, win_outcome_token_id, question) = cache::query_condition_id(&redeem.condition_id, true).await?;
 
 	// Extract token_ids
 	if token_ids.len() != 2 {
@@ -375,6 +383,8 @@ async fn handle_redeem(redeem: Redeem) -> anyhow::Result<()> {
 		privy_id: redeem.privy_id,
 		outcome_name_0,
 		outcome_name_1,
+		win_outcome_token_id,
+		question,
 	};
 
 	let response = rpc_client::redeem(request).await?;

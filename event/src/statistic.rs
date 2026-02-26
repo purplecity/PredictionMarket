@@ -30,8 +30,8 @@ pub async fn start_statistic_task() {
 async fn run_statistic() -> anyhow::Result<()> {
 	let pool = get_db_pool()?;
 
-	// 1. 获取所有未关闭的市场 ID
-	let active_event_ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM events WHERE closed = false ORDER BY id").fetch_all(&pool).await?;
+	// 1. 获取所有未关闭且未过期的市场 ID
+	let active_event_ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM events WHERE closed = false AND (end_date IS NULL OR end_date > NOW()) ORDER BY id").fetch_all(&pool).await?;
 
 	if active_event_ids.is_empty() {
 		info!("No active events to update volume");

@@ -1,6 +1,6 @@
 use {crate::cache, common::event_types::ApiMQEventCreate, futures_util::TryStreamExt, std::collections::HashMap, tracing::info};
 
-/// 从数据库加载所有未关闭的市场信息到内存缓存
+/// 从数据库加载所有市场信息到内存缓存
 pub async fn load_events() -> anyhow::Result<()> {
 	let read_pool = crate::db::get_db_read_pool()?;
 
@@ -8,7 +8,7 @@ pub async fn load_events() -> anyhow::Result<()> {
 
 	let mut count = 0;
 	// 使用流式查询，逐个处理市场记录
-	let mut stream = sqlx::query_as::<_, common::model::Events>("SELECT * FROM events WHERE closed = false").fetch(&read_pool);
+	let mut stream = sqlx::query_as::<_, common::model::Events>("SELECT * FROM events").fetch(&read_pool);
 
 	// 逐个处理每条记录
 	while let Some(event) = stream.try_next().await? {

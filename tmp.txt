@@ -1,0 +1,132 @@
+首先阅读仓库. 详细了解整个仓库每个member.
+需求:当前需要空投一些usdc这个erc20token给到注册的用户
+
+1. 用户注册是在api crate中user_data这个api处理函数的时候处理注册的. 你在common/src/consts.rs中定义redis stream的name和key 这样你在注册的时候把用户相关的信息(privy_id,uid,privy_evm_address)搞成一个结构体推到stream中,然后到statistics crate中去消费
+2. statistics中搞一个tokio task. 每次读取20个,这里你看是如果没到20个就阻塞个几秒,几秒后没到20个消息也直接去交互,当然没消息就继续等待读就好了.
+3. evm链,比如chain_id,usdc合约地址,disperse.app合约地址,usdc余额阈值,在statistics中的consts.rs中定义,common/src/common_env.rs中加一个交易发送地址的私钥,会拥有evm链条对应的原生资产,比如bnb/eth当作gas费. 同时也拥有usdc,就是这个用来往用户地址空投usdc的.
+4.disperse.app 合约代码和abi是
+[{"constant":false,"inputs":[{"name":"token","type":"address"},{"name":"recipients","type":"address[]"},{"name":"values","type":"uint256[]"}],"name":"disperseTokenSimpl
+  e","outputs":[],"payable":false,"stateMutability":"nonpayable","type":"function"},{"constant":false,"inputs":[{"name":"token","type":"address"},{"name":"recipients","ty
+  pe":"address[]"},{"name":"values","type":"uint256[]"}],"name":"disperseToken","outputs":[],"payable":false,"stateMutability":"nonpayable","type":"function"},{"constant"
+  :false,"inputs":[{"name":"recipients","type":"address[]"},{"name":"values","type":"uint256[]"}],"name":"disperseEther","outputs":[],"payable":true,"stateMutability":"pa
+  yable","type":"function"}] 这是disperse.app合约的abi文件  /**
+   *Submitted for verification at BscScan.com on 2020-09-14
+  */
+
+  pragma solidity ^0.4.25;
+
+
+  interface IERC20 {
+      function transfer(address to, uint256 value) external returns (bool);
+      function transferFrom(address from, address to, uint256 value) external returns (bool);
+  }
+
+
+  contract Disperse {
+      function disperseEther(address[] recipients, uint256[] values) external payable {
+          for (uint256 i = 0; i < recipients.length; i++)
+              recipients[i].transfer(values[i]);
+          uint256 balance = address(this).balance;
+          if (balance > 0)
+              msg.sender.transfer(balance);
+      }
+
+      function disperseToken(IERC20 token, address[] recipients, uint256[] values) external {
+          uint256 total = 0;
+          for (uint256 i = 0; i < recipients.length; i++)
+              total += values[i];
+          require(token.transferFrom(msg.sender, address(this), total));
+          for (i = 0; i < recipients.length; i++)
+              require(token.transfer(recipients[i], values[i]));
+      }
+
+      function disperseTokenSimple(IERC20 token, address[] recipients, uint256[] values) external {
+          for (uint256 i = 0; i < recipients.length; i++)
+              require(token.transferFrom(msg.sender, recipients[i], values[i]));
+      }
+  } 这是合约的具体代码
+
+5. usdc是erc20 token遵循标准erc20
+// SPDX-License-Identifier: MIT
+// OpenZeppelin Contracts (last updated v5.4.0) (token/ERC20/IERC20.sol)
+
+pragma solidity >=0.4.16;
+
+/**
+ * @dev Interface of the ERC-20 standard as defined in the ERC.
+ */
+interface IERC20 {
+    /**
+     * @dev Emitted when `value` tokens are moved from one account (`from`) to
+     * another (`to`).
+     *
+     * Note that `value` may be zero.
+     */
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    /**
+     * @dev Emitted when the allowance of a `spender` for an `owner` is set by
+     * a call to {approve}. `value` is the new allowance.
+     */
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+
+    /**
+     * @dev Returns the value of tokens in existence.
+     */
+    function totalSupply() external view returns (uint256);
+
+    /**
+     * @dev Returns the value of tokens owned by `account`.
+     */
+    function balanceOf(address account) external view returns (uint256);
+
+    /**
+     * @dev Moves a `value` amount of tokens from the caller's account to `to`.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transfer(address to, uint256 value) external returns (bool);
+
+    /**
+     * @dev Returns the remaining number of tokens that `spender` will be
+     * allowed to spend on behalf of `owner` through {transferFrom}. This is
+     * zero by default.
+     *
+     * This value changes when {approve} or {transferFrom} are called.
+     */
+    function allowance(address owner, address spender) external view returns (uint256);
+
+    /**
+     * @dev Sets a `value` amount of tokens as the allowance of `spender` over the
+     * caller's tokens.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * IMPORTANT: Beware that changing an allowance with this method brings the risk
+     * that someone may use both the old and the new allowance by unfortunate
+     * transaction ordering. One possible solution to mitigate this race
+     * condition is to first reduce the spender's allowance to 0 and set the
+     * desired value afterwards:
+     * https://github.com/ethereum/EIPs/issues/20#issuecomment-263524729
+     *
+     * Emits an {Approval} event.
+     */
+    function approve(address spender, uint256 value) external returns (bool);
+
+    /**
+     * @dev Moves a `value` amount of tokens from `from` to `to` using the
+     * allowance mechanism. `value` is then deducted from the caller's
+     * allowance.
+     *
+     * Returns a boolean value indicating whether the operation succeeded.
+     *
+     * Emits a {Transfer} event.
+     */
+    function transferFrom(address from, address to, uint256 value) external returns (bool);
+}
+6. evm交易发送请用https://alloy.rs/这个库,每次跟合约交互之前先读取私钥对应的地址看是否usdc余额够不够阈值,不够的话就打印错误
+https://alloy.rs/contract-interactions/read-contract这个是读取erc20余额的示例,
+https://alloy.rs/contract-interactions/write-contract这个是跟合约交互的示例, 而不是每次读取链上余额和发送交易都每次创建一个provider
+阅读https://alloy.rs/rpc-providers/http-provider等封装复用provider

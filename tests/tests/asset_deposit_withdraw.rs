@@ -19,7 +19,7 @@ async fn test_usdc_deposit() {
 	env.create_test_user(user_id, &privy_id).await.expect("Failed to create test user");
 
 	// 执行存款
-	let result = asset::handlers::handle_deposit(user_id, token_id, amount, &tx_hash, None, None, Some(privy_id.clone()), None, Some(env.pool.clone())).await;
+	let result = asset::handlers::handle_deposit(user_id, token_id, amount, &tx_hash, None, None, Some(privy_id.clone()), None, None, Some(env.pool.clone())).await;
 
 	// 验证结果
 	assert!(result.is_ok(), "Deposit should succeed: {:?}", result.err());
@@ -58,7 +58,7 @@ async fn test_token_deposit() {
 
 	// 执行存款
 	let result =
-		asset::handlers::handle_deposit(user_id, &token_0_id, amount, &tx_hash, Some(event_id), Some(market_id), Some(privy_id.clone()), Some("Yes".to_string()), Some(env.pool.clone())).await;
+		asset::handlers::handle_deposit(user_id, &token_0_id, amount, &tx_hash, Some(event_id), Some(market_id), Some(privy_id.clone()), Some("Yes".to_string()), None, Some(env.pool.clone())).await;
 
 	// 验证结果
 	assert!(result.is_ok(), "Token deposit should succeed: {:?}", result.err());
@@ -92,7 +92,7 @@ async fn test_usdc_withdraw() {
 	env.create_test_user(user_id, &privy_id).await.expect("Failed to create test user");
 
 	// 先存款
-	asset::handlers::handle_deposit(user_id, token_id, deposit_amount, &deposit_tx_hash, None, None, Some(privy_id.clone()), None, Some(env.pool.clone())).await.expect("Deposit should succeed");
+	asset::handlers::handle_deposit(user_id, token_id, deposit_amount, &deposit_tx_hash, None, None, Some(privy_id.clone()), None, None, Some(env.pool.clone())).await.expect("Deposit should succeed");
 
 	// 执行取款
 	let result = asset::handlers::handle_withdraw(user_id, token_id, withdraw_amount, &withdraw_tx_hash, None, None, Some(privy_id.clone()), None, Some(env.pool.clone())).await;
@@ -125,7 +125,7 @@ async fn test_withdraw_insufficient_balance() {
 	env.create_test_user(user_id, &privy_id).await.expect("Failed to create test user");
 
 	// 先存款
-	asset::handlers::handle_deposit(user_id, token_id, deposit_amount, &deposit_tx_hash, None, None, Some(privy_id.clone()), None, Some(env.pool.clone())).await.expect("Deposit should succeed");
+	asset::handlers::handle_deposit(user_id, token_id, deposit_amount, &deposit_tx_hash, None, None, Some(privy_id.clone()), None, None, Some(env.pool.clone())).await.expect("Deposit should succeed");
 
 	// 执行取款（应该成功，允许余额为负，因为用户掌握私钥）
 	let result = asset::handlers::handle_withdraw(user_id, token_id, withdraw_amount, &withdraw_tx_hash, None, None, Some(privy_id.clone()), None, Some(env.pool.clone())).await;
@@ -157,11 +157,11 @@ async fn test_duplicate_deposit_idempotency() {
 	env.create_test_user(user_id, &privy_id).await.expect("Failed to create test user");
 
 	// 第一次存款
-	let result1 = asset::handlers::handle_deposit(user_id, token_id, amount, &tx_hash, None, None, Some(privy_id.clone()), None, Some(env.pool.clone())).await;
+	let result1 = asset::handlers::handle_deposit(user_id, token_id, amount, &tx_hash, None, None, Some(privy_id.clone()), None, None, Some(env.pool.clone())).await;
 	assert!(result1.is_ok(), "First deposit should succeed");
 
 	// 使用相同的 tx_hash 再次存款（应该失败，因为违反联合唯一约束）
-	let result2 = asset::handlers::handle_deposit(user_id, token_id, amount, &tx_hash, None, None, Some(privy_id.clone()), None, Some(env.pool.clone())).await;
+	let result2 = asset::handlers::handle_deposit(user_id, token_id, amount, &tx_hash, None, None, Some(privy_id.clone()), None, None, Some(env.pool.clone())).await;
 	assert!(result2.is_err(), "Duplicate deposit should fail due to unique constraint violation");
 
 	// 验证余额（应该只计入一次）

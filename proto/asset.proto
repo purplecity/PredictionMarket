@@ -25,6 +25,7 @@ message DepositRequest {
   int32 market_id = 6;
   string privy_id = 7; // 用于websocket推送
   string outcome_name = 8;  // 用于websocket推送
+  string question = 9; // 用于文本搜索
 }
 
 //提现通知
@@ -156,6 +157,7 @@ message TakerTradeOnchainInfo {
   string taker_unfreeze_amount = 10;
   string taker_privy_user_id = 11; // 用于websocket推送
   string taker_outcome_name = 12;  // 用于websocket推送
+  string question = 13;  // 用于文本搜索
 }
 
 message MakerTradeOnchainInfo {
@@ -185,6 +187,7 @@ message SplitRequest {
   string privy_id = 10;    // 用于websocket推送
   string outcome_name_0 = 11;   // token_0 outcome名称
   string outcome_name_1 = 12;   // token_1 outcome名称
+  string question = 13;   // 用于文本搜索
 }
 
 message MergeRequest {
@@ -200,6 +203,7 @@ message MergeRequest {
   string privy_id = 10;    // 用于websocket推送
   string outcome_name_0 = 11;   // token_0 outcome名称
   string outcome_name_1 = 12;   // token_1 outcome名称
+  string question = 13;   // 用于文本搜索
 }
 
 message RedeemRequest {
@@ -213,6 +217,8 @@ message RedeemRequest {
   string privy_id = 10;    // 用于websocket推送
   string outcome_name_0 = 11;   // token_0 outcome名称
   string outcome_name_1 = 12;   // token_1 outcome名称
+  string win_outcome_token_id = 13;  // 赢的结果token id，用于确定更新哪个position
+  string question = 14;   // 用于文本搜索
 }
 
 // Asset服务定义
